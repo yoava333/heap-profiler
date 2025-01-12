@@ -15,7 +15,8 @@ const SAMPLE_MASK: usize = 0xFF; // For alignment
 const METADATA_SIZE: usize = std::mem::size_of::<AllocMetadata>();
 
 lazy_static! {
-    static ref PROFILE_DATA: Mutex<HashMap<u64, MemProfileRecord>> = Mutex::new(HashMap::new());
+    static ref PROFILE_DATA: Mutex<HashMap<u64, MemProfileRecord>> =
+        Mutex::new(HashMap::with_capacity(179_999));
 }
 
 thread_local! {
@@ -424,6 +425,8 @@ extern "C" fn my_realloc(
     new_size: usize,
 ) -> *mut std::ffi::c_void {
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
+
+    // Early return for recursive calls or null context
     if IN_MALLOC.get() {
         let original_allocator = my_allocator.original_allocator;
         return (original_allocator.realloc.unwrap())(original_allocator.ctx, ptr, new_size);
@@ -431,12 +434,30 @@ extern "C" fn my_realloc(
 
     IN_MALLOC.set(true);
 
-    // Check if this was a sampled allocation
-    let was_sampled = if !ptr.is_null() {
-        let potential_metadata = unsafe { (ptr as *mut AllocMetadata).offset(-1) };
-        unsafe { (*potential_metadata).magic == 0xDEADBEEF }
-    } else {
-        false
+    // Handle null pointer case
+    if ptr.is_null() {
+        let result = my_malloc(ctx, new_size);
+        IN_MALLOC.set(false);
+        return result;
+    }
+
+    // Check if this was a sampled allocation with safety checks
+    let was_sampled = unsafe {
+        let potential_metadata = (ptr as *mut AllocMetadata).offset(-1);
+        // Verify the pointer is properly aligned and within reasonable bounds
+        if (potential_metadata as usize) % std::mem::align_of::<AllocMetadata>() == 0 {
+            // Read the magic number with safety check
+            let magic = std::ptr::read_volatile(&(*potential_metadata).magic);
+            if magic == 0xDEADBEEF {
+                // Verify the size is reasonable
+                let size = (*potential_metadata).requested_size;
+                size > 0 && size <= new_size * 2 // Allow up to double size for realloc
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     };
 
     let should_profile = if was_sampled {
@@ -453,29 +474,38 @@ extern "C" fn my_realloc(
 
     let original_allocator = my_allocator.original_allocator;
     let new_ptr = if was_sampled {
-        // Get original metadata
+        // Get original metadata safely
         let old_ptr = unsafe { (ptr as *mut AllocMetadata).offset(-1) as *mut std::ffi::c_void };
         (original_allocator.realloc.unwrap())(original_allocator.ctx, old_ptr, new_alloc_size)
     } else {
         (original_allocator.realloc.unwrap())(original_allocator.ctx, ptr, new_alloc_size)
     };
 
-    if should_profile && !new_ptr.is_null() {
+    // Handle allocation failure
+    if new_ptr.is_null() {
+        IN_MALLOC.set(false);
+        return std::ptr::null_mut();
+    }
+
+    if should_profile {
         // Record the stack trace
         let mut stack = std::array::from_fn(|_| StackFrame::default());
         let depth = where_in_python(&mut stack);
 
         let stack_hash = calculate_stack_hash(&stack[..depth]);
 
-        // Store metadata at the start of allocation
+        // Store metadata at the start of allocation with safety checks
         let metadata = new_ptr as *mut AllocMetadata;
         unsafe {
-            (*metadata) = AllocMetadata {
-                magic: 0xDEADBEEF,
-                stack_hash,
-                requested_size: new_size,
-                total_size: new_alloc_size,
-            };
+            std::ptr::write_volatile(
+                metadata,
+                AllocMetadata {
+                    magic: 0xDEADBEEF,
+                    stack_hash,
+                    requested_size: new_size,
+                    total_size: new_alloc_size,
+                },
+            );
         }
 
         // Update profile data
