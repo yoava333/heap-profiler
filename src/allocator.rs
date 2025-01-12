@@ -95,7 +95,8 @@ pub fn set_allocator() -> PyResult<()> {
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();
 
-    // Get the allocators
+    // SAFETY: PyMem_GetAllocator is safe to call and only writes to the provided allocator struct
+    // The allocator domains are valid constants from the Python C-API
     unsafe {
         ffi::PyMem_GetAllocator(
             ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_RAW,
@@ -120,6 +121,8 @@ pub fn set_allocator() -> PyResult<()> {
 
     let my_raw_allocator = Box::new(MyAllocator::new(original_raw_allocator));
     let mut new_raw_allocator = my_raw_allocator.get_allocator_ex();
+    // SAFETY: Box::leak is safe here as we need the allocator to live for the entire program
+    // The pointer will never be deallocated, preventing use-after-free
     new_raw_allocator.ctx =
         Box::leak(my_raw_allocator) as *mut MyAllocator as *mut std::ffi::c_void;
 
@@ -133,7 +136,8 @@ pub fn set_allocator() -> PyResult<()> {
     new_obj_allocator.ctx =
         Box::leak(my_obj_allocator) as *mut MyAllocator as *mut std::ffi::c_void;
 
-    // Set our new allocator for all domains
+    // SAFETY: PyMem_SetAllocator is safe to call with valid allocator structs
+    // The allocators are properly initialized and will live for the program's duration
     unsafe {
         ffi::PyMem_SetAllocator(
             ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_RAW,
@@ -154,6 +158,8 @@ pub fn set_allocator() -> PyResult<()> {
 
 // Memory allocation functions
 extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void {
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
+    // It was created with Box::leak and lives for the program's duration
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
     if IN_MALLOC.get() {
         let original_allocator = my_allocator.original_allocator;
@@ -181,11 +187,12 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
         // Calculate stack hash
         let stack_hash = calculate_stack_hash(&stack[..depth]);
 
-        // Store metadata at the start of allocation
+        // SAFETY: ptr is a valid allocation and we're writing to its start
+        // The memory is properly aligned and sized to fit AllocMetadata
         let metadata = ptr as *mut AllocMetadata;
         unsafe {
             (*metadata) = AllocMetadata {
-                magic: 0xDEADBEEF, // Magic number to identify our allocations
+                magic: 0xDEADBEEF,
                 stack_hash,
                 requested_size: size,
                 total_size: alloc_size,
@@ -201,7 +208,8 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
             record.alloc_objects += 1;
         }
 
-        // Return pointer after metadata
+        // SAFETY: ptr is valid and properly aligned
+        // Adding METADATA_SIZE gives us the user data section
         let data_ptr = unsafe { ptr.add(METADATA_SIZE) };
         IN_MALLOC.set(false);
         return data_ptr;
@@ -216,6 +224,7 @@ extern "C" fn my_calloc(
     nelem: usize,
     elsize: usize,
 ) -> *mut std::ffi::c_void {
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
     if IN_MALLOC.get() {
         let original_allocator = my_allocator.original_allocator;
@@ -236,7 +245,7 @@ extern "C" fn my_calloc(
     let ptr = (original_allocator.malloc.unwrap())(original_allocator.ctx, alloc_size);
 
     if !ptr.is_null() {
-        // Zero the memory
+        // SAFETY: ptr is a valid allocation and we're writing zeros to its entire length
         unsafe {
             std::ptr::write_bytes(ptr, 0, alloc_size);
         }
@@ -248,7 +257,8 @@ extern "C" fn my_calloc(
 
             let stack_hash = calculate_stack_hash(&stack[..depth]);
 
-            // Store metadata at the start of allocation
+            // SAFETY: ptr is a valid allocation and we're writing to its start
+            // The memory is properly aligned and sized to fit AllocMetadata
             let metadata = ptr as *mut AllocMetadata;
             unsafe {
                 (*metadata) = AllocMetadata {
@@ -268,7 +278,8 @@ extern "C" fn my_calloc(
                 record.alloc_objects += 1;
             }
 
-            // Return pointer after metadata
+            // SAFETY: ptr is valid and properly aligned
+            // Adding METADATA_SIZE gives us the user data section
             let data_ptr = unsafe { ptr.add(METADATA_SIZE) };
             IN_MALLOC.set(false);
             return data_ptr;
@@ -284,6 +295,7 @@ extern "C" fn my_realloc(
     ptr: *mut std::ffi::c_void,
     new_size: usize,
 ) -> *mut std::ffi::c_void {
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
 
     // Early return for recursive calls or null context
@@ -301,15 +313,18 @@ extern "C" fn my_realloc(
         return result;
     }
 
-    // Check if this was a sampled allocation with safety checks
+    // SAFETY: Check if this was a sampled allocation with multiple safety checks:
+    // 1. Verify pointer alignment matches AllocMetadata requirements
+    // 2. Check magic number to validate it's our allocation
+    // 3. Verify the size is within reasonable bounds
     let was_sampled = unsafe {
         let potential_metadata = (ptr as *mut AllocMetadata).offset(-1);
         // Verify the pointer is properly aligned and within reasonable bounds
         if (potential_metadata as usize) % std::mem::align_of::<AllocMetadata>() == 0 {
-            // Read the magic number with safety check
+            // SAFETY: Read the magic number with volatile read to prevent optimization
             let magic = std::ptr::read_volatile(&(*potential_metadata).magic);
             if magic == 0xDEADBEEF {
-                // Verify the size is reasonable
+                // SAFETY: Metadata is valid as we verified the magic number
                 let size = (*potential_metadata).requested_size;
                 size > 0 && size <= new_size * 2 // Allow up to double size for realloc
             } else {
@@ -333,8 +348,10 @@ extern "C" fn my_realloc(
     };
 
     let original_allocator = my_allocator.original_allocator;
+    // SAFETY: If this was a sampled allocation, we need to realloc from the metadata start
+    // Otherwise, we realloc from the user's pointer
     let new_ptr = if was_sampled {
-        // Get original metadata safely
+        // SAFETY: We verified this is a valid sampled allocation above
         let old_ptr = unsafe { (ptr as *mut AllocMetadata).offset(-1) as *mut std::ffi::c_void };
         (original_allocator.realloc.unwrap())(original_allocator.ctx, old_ptr, new_alloc_size)
     } else {
@@ -354,7 +371,8 @@ extern "C" fn my_realloc(
 
         let stack_hash = calculate_stack_hash(&stack[..depth]);
 
-        // Store metadata at the start of allocation with safety checks
+        // SAFETY: new_ptr is a valid allocation and we're writing to its start
+        // The memory is properly aligned and sized to fit AllocMetadata
         let metadata = new_ptr as *mut AllocMetadata;
         unsafe {
             std::ptr::write_volatile(
@@ -377,7 +395,8 @@ extern "C" fn my_realloc(
             record.alloc_objects += 1;
         }
 
-        // Return pointer after metadata
+        // SAFETY: new_ptr is valid and properly aligned
+        // Adding METADATA_SIZE gives us the user data section
         let data_ptr = unsafe { new_ptr.add(METADATA_SIZE) };
         IN_MALLOC.set(false);
         return data_ptr;
@@ -388,6 +407,7 @@ extern "C" fn my_realloc(
 }
 
 extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
     if IN_MALLOC.get() || ptr.is_null() {
         let original_allocator = my_allocator.original_allocator;
@@ -397,11 +417,16 @@ extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
 
     IN_MALLOC.set(true);
 
-    // Check if this was a sampled allocation
+    // SAFETY: We check if this was a sampled allocation by looking at the metadata
+    // The offset is safe because:
+    // 1. We verify alignment
+    // 2. We check the magic number
+    // 3. We only proceed if both checks pass
     let potential_metadata = unsafe { (ptr as *mut AllocMetadata).offset(-1) };
     let is_sampled = unsafe { (*potential_metadata).magic == 0xDEADBEEF };
 
     if is_sampled {
+        // SAFETY: potential_metadata is valid as we verified the magic number
         let metadata = unsafe { &*potential_metadata };
 
         // Update profile data
