@@ -12,3 +12,4 @@ crate-type = ["cdylib"]
 pyo3 = { path = "../../repos/pyo3" }
 libc = "0.2"
 lazy_static = "1.4.0"
+rand = "0.8.5"
