@@ -1,4 +1,4 @@
-from heap_profiler import get_profile_data, set_allocator
+from heap_profiler import get_profile_data, set_allocator, write_heap_proto
 
 
 def setup_allocator():
@@ -29,6 +29,11 @@ def allocate_and_free():
         for filename, lineno in stack:
             print(f"  {filename}:{lineno}")
 
+    # Write heap profile to file
+    profile_data = write_heap_proto()
+    with open("heap.prof", "wb") as f:
+        f.write(profile_data)
+
     # Free half the objects
     objects = objects[5:]
 
@@ -53,8 +58,13 @@ def allocate_and_free():
         for filename, lineno in stack:
             print(f"  {filename}:{lineno}")
 
+    # Write updated heap profile
+    profile_data = write_heap_proto()
+    with open("heap_after_free.prof", "wb") as f:
+        f.write(profile_data)
+
 
 if __name__ == "__main__":
     setup_allocator()
     allocate_and_free()
-    allocate_and_free()
+    allocate_and_free()  # Run twice to test multiple allocations
