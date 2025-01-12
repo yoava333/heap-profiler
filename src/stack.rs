@@ -27,7 +27,7 @@ pub fn calculate_stack_hash(stack: &[StackFrame]) -> u64 {
 }
 
 pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
-    let mut depth = 0;
+    let mut depth: usize = 0;
 
     Python::with_gil(|_py| {
         // SAFETY: PyGILState_GetThisThreadState is safe to call while holding the GIL

@@ -1,7 +1,10 @@
+#![feature(no_sanitize)]
+
 // Main library file that re-exports and coordinates modules
 mod allocator;
 mod profile;
 mod proto;
+mod recursion_guard;
 mod stack;
 
 use pyo3::prelude::*;
