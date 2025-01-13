@@ -34,51 +34,63 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
 
     Python::with_gil(|_py| {
         // SAFETY: PyGILState_GetThisThreadState is safe to call while holding the GIL
-        // It returns the current thread state which is guaranteed to be valid
         let thread_state = unsafe { ffi::PyGILState_GetThisThreadState() };
+        if thread_state.is_null() {
+            return 0;
+        }
 
         // SAFETY: PyThreadState_GetFrame is safe to call on a valid thread state
-        // The returned frame pointer may be null, which we check
-        let mut frame = if !thread_state.is_null() {
-            unsafe { ffi::PyThreadState_GetFrame(thread_state) }
-        } else {
-            std::ptr::null_mut()
-        };
-
+        let mut frame = unsafe { ffi::PyThreadState_GetFrame(thread_state) };
         if frame.is_null() {
             return 0;
         }
 
+        // Ensure we clean up the initial frame reference on all exit paths
+        struct FrameGuard(*mut ffi::PyObject);
+        impl Drop for FrameGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { ffi::Py_XDECREF(self.0) };
+                }
+            }
+        }
+        let _frame_guard = FrameGuard(frame as *mut ffi::PyObject);
+
         // SAFETY: The following unsafe block handles Python frame traversal
-        // All operations are safe because:
-        // 1. We hold the GIL throughout
-        // 2. We check all pointers for null before dereferencing
-        // 3. We properly manage reference counts with Py_DECREF and Py_XDECREF
-        // 4. We stay within the bounds of the stack array (depth < 128)
         unsafe {
             while !frame.is_null() && depth < 128 {
-                // Get code object from frame
+                // Get code object and ensure cleanup
                 let code = ffi::PyFrame_GetCode(frame);
                 if code.is_null() {
                     break;
                 }
+                struct CodeGuard(*mut ffi::PyObject);
+                impl Drop for CodeGuard {
+                    fn drop(&mut self) {
+                        unsafe { ffi::Py_DECREF(self.0) };
+                    }
+                }
+                let _code_guard = CodeGuard(code as *mut ffi::PyObject);
 
                 // Get filename from code object
-                // SAFETY: code is guaranteed non-null here, and co_filename is a required field
                 let co_filename = (*code).co_filename;
                 if co_filename.is_null() {
                     warn!("co_filename is null");
-                    ffi::Py_DECREF(code as *mut ffi::PyObject);
                     break;
                 }
 
                 let ascii_str = ffi::PyUnicode_AsASCIIString(co_filename);
                 if ascii_str.is_null() {
                     warn!("Failed to convert filename to ASCII string");
-                    // Clean up code object if filename conversion fails
-                    ffi::Py_DECREF(code as *mut ffi::PyObject);
                     break;
                 }
+                struct AsciiGuard(*mut ffi::PyObject);
+                impl Drop for AsciiGuard {
+                    fn drop(&mut self) {
+                        unsafe { ffi::Py_XDECREF(self.0) };
+                    }
+                }
+                let _ascii_guard = AsciiGuard(ascii_str as *mut ffi::PyObject);
 
                 // Convert filename to string
                 // SAFETY: PyBytes_AsString returns a pointer to the internal buffer
@@ -86,8 +98,6 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                 let fname = ffi::PyBytes_AsString(ascii_str);
                 if fname.is_null() {
                     warn!("Failed to get filename string pointer");
-                    ffi::Py_XDECREF(ascii_str);
-                    ffi::Py_DECREF(code as *mut ffi::PyObject);
                     break;
                 }
 
@@ -139,18 +149,8 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                     Err(e) => warn!("Failed to convert filename to string: {}", e),
                 }
 
-                // Clean up references
-                // SAFETY: Py_XDECREF handles null pointers safely
-                ffi::Py_XDECREF(ascii_str);
-                // SAFETY: code is guaranteed non-null here
-                ffi::Py_DECREF(code as *mut ffi::PyObject);
-
-                // Get next frame
-                // SAFETY: PyFrame_GetBack returns a new reference or null
-                let next_frame = ffi::PyFrame_GetBack(frame);
-                // SAFETY: Py_XDECREF handles null pointers safely
-                ffi::Py_XDECREF(frame as *mut ffi::PyObject);
-                frame = next_frame;
+                // Get next frame (previous guard will clean up current frame)
+                frame = ffi::PyFrame_GetBack(frame);
             }
         }
         depth

@@ -1,9 +1,9 @@
 use crate::proto::*;
 use crate::stack::StackFrame;
+use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use prost::Message;
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 // Constants for sampling

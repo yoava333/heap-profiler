@@ -1,5 +1,5 @@
+use hashbrown::HashMap;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 // A wrapper around raw pointers that implements Send and Sync
