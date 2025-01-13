@@ -178,39 +178,52 @@ pub fn write_heap_proto() -> PyResult<Vec<u8>> {
 
         // Process stack frames
         for frame in record.stack0.iter().take_while(|f| !f.filename.is_empty()) {
-            // Create function
+            // Get the filename and create a mapping for it
+            let (display_name, filename, lineno) = if frame.filename.starts_with("<frozen") {
+                let clean_name = frame.filename.trim_matches(|c| c == '<' || c == '>');
+                let display = if !frame.function_name.is_empty() {
+                    format!("{}:{} {}", clean_name, frame.lineno, frame.function_name)
+                } else {
+                    format!("{}:{}", clean_name, frame.lineno)
+                };
+                (display, clean_name.to_string(), frame.lineno)
+            } else {
+                let display = if !frame.function_name.is_empty() {
+                    format!(
+                        "{}:{} {}",
+                        frame.filename, frame.lineno, frame.function_name
+                    )
+                } else {
+                    format!("{}:{}", frame.filename, frame.lineno)
+                };
+                (display, frame.filename.clone(), frame.lineno)
+            };
+
+            // Add filename to string table first
+            let filename_id = if let Some(&idx) = string_index_map.get(&filename) {
+                idx
+            } else {
+                let idx = next_string_id;
+                next_string_id += 1;
+                string_index_map.insert(filename.clone(), idx);
+                idx
+            };
+
+            // Add display name to string table
+            let display_name_id = if let Some(&idx) = string_index_map.get(&display_name) {
+                idx
+            } else {
+                let idx = next_string_id;
+                next_string_id += 1;
+                string_index_map.insert(display_name.clone(), idx);
+                idx
+            };
+
+            // Create function with both filename and line number
             let function_id = next_function_id;
             next_function_id += 1;
 
-            // Create a more descriptive function name that includes the line number
-            let name = format!("{}:{}", frame.filename, frame.lineno);
-            let name_id = if let Some(&idx) = string_index_map.get(&name) {
-                idx
-            } else {
-                let idx = next_string_id;
-                next_string_id += 1;
-                string_index_map.insert(name, idx);
-                idx
-            };
-
-            let filename_id = if let Some(&idx) = string_index_map.get(&frame.filename) {
-                idx
-            } else {
-                let idx = next_string_id;
-                next_string_id += 1;
-                string_index_map.insert(frame.filename.clone(), idx);
-                idx
-            };
-
-            profile.function.push(Function {
-                id: function_id,
-                name: name_id,
-                system_name: name_id,
-                filename: filename_id,
-                start_line: frame.lineno as i64,
-            });
-
-            // Add mapping information
+            // Add mapping information first
             profile.mapping.push(Mapping {
                 id: function_id,
                 memory_start: 0,
@@ -224,7 +237,16 @@ pub fn write_heap_proto() -> PyResult<Vec<u8>> {
                 has_inline_frames: false,
             });
 
-            // Create location with mapping reference
+            // Then add function
+            profile.function.push(Function {
+                id: function_id,
+                name: display_name_id, // Use the display name that includes line number
+                system_name: display_name_id,
+                filename: filename_id,
+                start_line: lineno as i64,
+            });
+
+            // Create location
             let location_id = next_location_id;
             next_location_id += 1;
 
@@ -234,7 +256,7 @@ pub fn write_heap_proto() -> PyResult<Vec<u8>> {
                 address: 0,
                 line: vec![Line {
                     function_id,
-                    line: frame.lineno as i64,
+                    line: lineno as i64,
                 }],
                 is_folded: false,
             });
