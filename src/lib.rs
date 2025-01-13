@@ -2,6 +2,7 @@
 
 // Main library file that re-exports and coordinates modules
 mod allocator;
+mod metadata_store;
 mod profile;
 mod proto;
 mod recursion_guard;

@@ -10,11 +10,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { path = "../../repos/pyo3" }
-libc = "0.2"
-lazy_static = "1.4.0"
+pyo3-ffi = { path = "../../repos/pyo3/pyo3-ffi" }
 rand = "0.8.5"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.19", features = ["json", "env-filter"] }
+tracing-appender = "0.2.3"
+once_cell = "1.19.0"
 prost = "0.12"
 bytes = "1.5"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-tracing-appender = "0.2"
+lazy_static = "1.4.0"
+
+[build-dependencies]
+pyo3-build-config = "0.22.0"

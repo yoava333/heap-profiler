@@ -1,21 +1,23 @@
+use crate::metadata_store::{self, AllocationMetadata, HEAP_PROFILER_MAGIC_NUMBER};
 use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA};
 use crate::stack::{calculate_stack_hash, where_in_python, StackFrame};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use rand::Rng;
 use std::cell::Cell;
+use std::sync::Once;
 use tracing::{info, warn};
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{self, fmt::format::JsonFields, Registry};
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 use crate::recursion_guard::MallocRecursionGuard;
+
 // Constants for sampling and allocation
 const MIN_SAMPLE_SIZE: usize = 256 * 1024; // 256KB - always sample allocations larger than this
-const SAMPLE_MASK: usize = 0xFF; // For alignment
-const METADATA_SIZE: usize = std::mem::size_of::<AllocMetadata>();
 
 // aka "SMALL_REQUEST_THRESHOLD" in cpython/Objects/obmalloc.c
 const PYMALLOC_MAX_SIZE: usize = 512;
+
+static INIT_TRACING: Once = Once::new();
 
 thread_local! {
     static NEXT_SAMPLE: Cell<i32> = Cell::new(0);
@@ -26,17 +28,6 @@ pub struct MyAllocator {
     pub original_allocator: ffi::PyMemAllocatorEx,
     pub domain: ffi::PyMemAllocatorDomain,
 }
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AllocMetadata {
-    magic: u64,      // Magic number to identify our allocations
-    stack_hash: u64, // Hash of the stack trace
-    requested_size: usize,
-    total_size: usize,
-}
-
-const HEAP_PROFILER_MAGIC_NUMBER: u64 = 0xDEADBEEF;
 
 impl MyAllocator {
     pub fn new(
@@ -115,17 +106,14 @@ fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
         // Calculate stack hash
         let stack_hash = calculate_stack_hash(&stack[..depth]);
 
-        // SAFETY: ptr is a valid allocation and we're writing to its start
-        // The memory is properly aligned and sized to fit AllocMetadata
-        let metadata = ptr as *mut AllocMetadata;
-        unsafe {
-            (*metadata) = AllocMetadata {
-                magic: HEAP_PROFILER_MAGIC_NUMBER,
-                stack_hash,
-                requested_size: size,
-                total_size: size + METADATA_SIZE,
-            };
-        }
+        let metadata = AllocationMetadata {
+            magic: HEAP_PROFILER_MAGIC_NUMBER,
+            stack_hash,
+            requested_size: size,
+            total_size: size,
+        };
+
+        metadata_store::store_metadata(ptr, metadata);
 
         // Update profile data
         if let Ok(mut profile_data) = PROFILE_DATA.lock() {
@@ -137,17 +125,30 @@ fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
         }
     }
 }
-fn handle_free(ptr: *mut std::ffi::c_void, size: usize) {}
+
+fn handle_free(ptr: *mut std::ffi::c_void) {
+    if let Some(metadata) = metadata_store::remove_metadata(ptr) {
+        // Update profile data
+        if let Ok(mut profile_data) = PROFILE_DATA.lock() {
+            if let Some(record) = profile_data.get_mut(&metadata.stack_hash) {
+                record.free_bytes += metadata.requested_size as i64;
+                record.free_objects += 1;
+            }
+        }
+    }
+}
 
 #[pyfunction]
 pub fn set_allocator() -> PyResult<()> {
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+    // Initialize tracing only once
+    INIT_TRACING.call_once(|| {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer())
+            .with(EnvFilter::from_default_env())
+            .try_init()
+            .ok();
+    });
 
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env())
-        .init();
-    // Initialize tracing
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();
@@ -228,7 +229,6 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
 
     // Ensure all allocation requests are multiples of eight,
     // mirroring the actual allocation sizes employed by pymalloc
-    // (See https://github.com/python/cpython/blob/main/Objects/obmalloc.c#L807)
     let new_size = if size <= PYMALLOC_MAX_SIZE {
         if size == 0 {
             8
@@ -239,50 +239,20 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
         size
     };
 
-    info!(operation = "malloc", size = size, "Allocating memory");
-
     // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
 
-    let alloc_size = new_size + METADATA_SIZE;
-
-    let guard = MallocRecursionGuard::new();
+    let _guard = MallocRecursionGuard::new();
     let original_allocator = my_allocator.original_allocator;
-    let ptr = (original_allocator.malloc.unwrap())(original_allocator.ctx, alloc_size);
 
-    if ptr.is_null() {
-        warn!(
-            operation = "malloc_failed",
-            requested_size = size,
-            "Memory allocation failed"
-        );
-        return std::ptr::null_mut();
-    }
+    // SAFETY: original_allocator.malloc is guaranteed to be Some
+    let ptr = (original_allocator.malloc.unwrap())(original_allocator.ctx, new_size);
 
-    let metadata = ptr as *mut AllocMetadata;
-    unsafe {
-        (*metadata) = AllocMetadata {
-            magic: HEAP_PROFILER_MAGIC_NUMBER,
-            stack_hash: 0,
-            requested_size: size,
-            total_size: alloc_size,
-        };
-    }
-
-    let data_ptr = unsafe { ptr.add(METADATA_SIZE) };
-    if !guard.was_in_malloc() {
+    if !ptr.is_null() {
         handle_malloc(ptr, size);
     }
 
-    info!(
-        operation = "malloc_success",
-        size = size,
-        ptr = ?format!("{:#x}", ptr as usize),
-        data_ptr = ?format!("{:#x}", data_ptr as usize),
-        "Regular allocation"
-    );
-
-    return data_ptr;
+    ptr
 }
 
 extern "C" fn my_calloc(
@@ -322,29 +292,13 @@ extern "C" fn my_realloc(
     }
 
     let guard = MallocRecursionGuard::new();
-    let metadata_ptr = unsafe { (ptr as *mut AllocMetadata).offset(-1) };
-    let orig_size = if let Some(metadata) = check_is_sampled(metadata_ptr) {
-        metadata.requested_size
-    } else {
-        0
-    };
-
-    let alloc_size = new_size + METADATA_SIZE;
 
     // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
     let original_allocator = my_allocator.original_allocator;
 
-    // Use the original pointer (with metadata) for realloc
-    let new_ptr = if let Some(_) = check_is_sampled(metadata_ptr) {
-        (original_allocator.realloc.unwrap())(
-            original_allocator.ctx,
-            metadata_ptr as *mut std::ffi::c_void,
-            alloc_size,
-        )
-    } else {
-        (original_allocator.realloc.unwrap())(original_allocator.ctx, ptr, alloc_size)
-    };
+    // Use the original pointer for realloc
+    let new_ptr = (original_allocator.realloc.unwrap())(original_allocator.ctx, ptr, new_size);
 
     // Check if realloc failed
     if new_ptr.is_null() {
@@ -356,69 +310,26 @@ extern "C" fn my_realloc(
         return std::ptr::null_mut();
     }
 
-    // Update metadata in the new location
-    unsafe {
-        (*(new_ptr as *mut AllocMetadata)) = AllocMetadata {
-            magic: HEAP_PROFILER_MAGIC_NUMBER,
-            stack_hash: 0, // We could preserve the old stack_hash if needed
-            requested_size: new_size,
-            total_size: alloc_size,
-        };
-    }
-
-    let data_ptr = unsafe { new_ptr.add(METADATA_SIZE) };
     if !guard.was_in_malloc() {
-        // handle_realloc(data_ptr, orig_size, new_size);
+        handle_malloc(new_ptr, new_size);
     }
 
-    data_ptr
-}
-
-#[no_sanitize(address)]
-fn check_is_sampled(potential_metadata: *mut AllocMetadata) -> Option<AllocMetadata> {
-    unsafe {
-        if (*potential_metadata).magic == HEAP_PROFILER_MAGIC_NUMBER {
-            Some(*potential_metadata)
-        } else {
-            None
-        }
-    }
+    new_ptr
 }
 
 extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
-    info!(operation = "free", ptr = ?format!("{:#x}", ptr as usize), "Freeing memory");
-
     if ptr.is_null() {
         return;
     }
 
-    let guard = MallocRecursionGuard::new();
+    let _guard = MallocRecursionGuard::new();
 
-    let mut original_ptr = ptr;
     // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
-
-    let potential_metadata = unsafe { (ptr as *mut AllocMetadata).offset(-1) };
-    let sampled_metadata = check_is_sampled(potential_metadata);
-    if let Some(metadata) = sampled_metadata {
-        original_ptr = potential_metadata as *mut std::ffi::c_void;
-        if !guard.was_in_malloc() {
-            if let Ok(mut profile_data) = PROFILE_DATA.lock() {
-                if let Some(record) = profile_data.get_mut(&metadata.stack_hash) {
-                    record.free_bytes += metadata.requested_size as i64;
-                    record.free_objects += 1;
-                }
-            }
-        }
-    }
-
-    info!(
-        operation = "free",
-        data_ptr = ?format!("{:#x}", ptr as usize),
-        ptr = ?format!("{:#x}", original_ptr as usize),
-        "Freeing memory"
-    );
-
     let original_allocator = my_allocator.original_allocator;
-    (original_allocator.free.unwrap())(original_allocator.ctx, original_ptr);
+
+    handle_free(ptr);
+
+    // SAFETY: original_allocator.free is guaranteed to be Some
+    (original_allocator.free.unwrap())(original_allocator.ctx, ptr);
 }

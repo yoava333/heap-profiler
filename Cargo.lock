@@ -88,9 +88,11 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "lazy_static",
- "libc",
+ "once_cell",
  "prost",
  "pyo3",
+ "pyo3-build-config 0.22.6",
+ "pyo3-ffi",
  "rand",
  "tracing",
  "tracing-appender",
@@ -263,7 +265,7 @@ dependencies = [
  "memoffset",
  "once_cell",
  "portable-atomic",
- "pyo3-build-config",
+ "pyo3-build-config 0.23.3",
  "pyo3-ffi",
  "pyo3-macros",
  "unindent",
@@ -271,10 +273,20 @@ dependencies = [
 
 [[package]]
 name = "pyo3-build-config"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b14b5775b5ff446dd1056212d778012cbe8a0fbffd368029fd9e25b514479c38"
+dependencies = [
+ "once_cell",
+ "target-lexicon 0.12.16",
+]
+
+[[package]]
+name = "pyo3-build-config"
 version = "0.23.3"
 dependencies = [
  "once_cell",
- "target-lexicon",
+ "target-lexicon 0.13.1",
 ]
 
 [[package]]
@@ -282,7 +294,7 @@ name = "pyo3-ffi"
 version = "0.23.3"
 dependencies = [
  "libc",
- "pyo3-build-config",
+ "pyo3-build-config 0.23.3",
 ]
 
 [[package]]
@@ -301,7 +313,7 @@ version = "0.23.3"
 dependencies = [
  "heck",
  "proc-macro2",
- "pyo3-build-config",
+ "pyo3-build-config 0.23.3",
  "quote",
  "syn",
 ]
@@ -452,6 +464,12 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "target-lexicon"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "target-lexicon"
