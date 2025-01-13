@@ -1,4 +1,4 @@
-use crate::metadata_store::{self, AllocationMetadata, HEAP_PROFILER_MAGIC_NUMBER};
+use crate::metadata_store::{self, AllocationMetadata};
 use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA};
 use crate::stack::{calculate_stack_hash, where_in_python, StackFrame};
 use pyo3::ffi;
@@ -107,10 +107,8 @@ fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
         let stack_hash = calculate_stack_hash(&stack[..depth]);
 
         let metadata = AllocationMetadata {
-            magic: HEAP_PROFILER_MAGIC_NUMBER,
             stack_hash,
             requested_size: size,
-            total_size: size,
         };
 
         metadata_store::store_metadata(ptr, metadata);
@@ -266,11 +264,9 @@ extern "C" fn my_calloc(
         return std::ptr::null_mut();
     }
     unsafe {
-        // SAFETY: ptr is a valid allocation and we're writing to its start
-        // memset(ptr, 0, nbytes);
         std::ptr::write_bytes(ptr, 0, nbytes);
     }
-    return ptr;
+    ptr
 }
 
 extern "C" fn my_realloc(
