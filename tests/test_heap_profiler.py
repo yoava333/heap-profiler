@@ -27,8 +27,12 @@ def test_basic_allocation():
             assert alloc_objects > 0
             assert free_bytes == 0  # Not freed yet
             assert free_objects == 0
-            # Check stack trace points to this file
-            assert any("test_heap_profiler.py" in frame[0] for frame in stack)
+            # Check stack trace points to this file and contains function name
+            assert any(
+                "test_heap_profiler.py" in frame[0]
+                and frame[2] == "test_basic_allocation"
+                for frame in stack
+            ), "Stack frame should contain function name 'test_basic_allocation'"
 
     assert found, "Large allocation not found in profile data"
 
@@ -44,6 +48,12 @@ def test_basic_allocation():
             found = True
             assert free_bytes >= alloc_bytes  # Should be fully freed
             assert free_objects >= alloc_objects
+            # Verify function name is still present in stack trace
+            assert any(
+                "test_heap_profiler.py" in frame[0]
+                and frame[2] == "test_basic_allocation"
+                for frame in stack
+            ), "Stack frame should contain function name after deallocation"
 
     assert found, "Freed allocation not found in profile data"
 
@@ -243,6 +253,38 @@ def test_heap_proto_export():
 
     # Clean up
     del data
+    gc.collect()
+
+
+def test_frame_information():
+    """Test that frame information is correctly captured"""
+
+    def nested_function():
+        # Create an allocation to trigger profiling
+        data = bytes(b"\x01" * 1024 * 1024)  # 1MB
+        profiles = get_profile_data()
+
+        # Find our allocation
+        for alloc_bytes, _, _, _, stack in profiles:
+            if alloc_bytes >= 1024 * 1024:  # Look for our 1MB allocation
+                # Find the frame corresponding to this function
+                frame_found = False
+                for frame in stack:
+                    filename, lineno, function = frame[0], frame[1], frame[2]
+                    print(
+                        f"Frame - File: {filename}, Line: {lineno}, Function: {function}"
+                    )
+                    if "test_heap_profiler.py" in filename:
+                        frame_found = True
+                        assert (
+                            function == "nested_function"
+                        ), f"Expected function name 'nested_function', got '{function}'"
+                assert frame_found, "Frame from test file not found in stack"
+                return
+
+        assert False, "Large allocation not found in profile data"
+
+    nested_function()
     gc.collect()
 
 
