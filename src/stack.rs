@@ -1,17 +1,30 @@
 use pyo3::ffi;
 use pyo3::prelude::*;
+use std::borrow::Cow;
 use std::ffi::CStr;
 use std::hash::{Hash, Hasher};
 use tracing::{debug, warn};
 
+use crate::interner::intern;
 use crate::recursion_guard::PythonGCGuard;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct StackFrame {
-    pub filename: String,
+    pub filename: Cow<'static, str>,
     pub lineno: i32,
     pub bytei: i32,
-    pub function_name: String,
+    pub function_name: Cow<'static, str>,
+}
+
+impl Default for StackFrame {
+    fn default() -> Self {
+        Self {
+            filename: Cow::Borrowed(""),
+            lineno: 0,
+            bytei: 0,
+            function_name: Cow::Borrowed(""),
+        }
+    }
 }
 
 impl Hash for StackFrame {
@@ -114,7 +127,7 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
 
                         // Get function name from code object
                         let co_name = (*code).co_name;
-                        let mut function_name = String::new();
+                        let mut function_name = Cow::Borrowed("");
 
                         if !co_name.is_null() {
                             let name_ascii = ffi::PyUnicode_AsASCIIString(co_name);
@@ -124,7 +137,7 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                                     match CStr::from_ptr(name_ptr).to_str() {
                                         Ok(name_str) => {
                                             debug!("Got function name: {}", name_str);
-                                            function_name = name_str.to_string();
+                                            function_name = intern(name_str);
                                         }
                                         Err(e) => warn!(
                                             "Failed to convert function name to string: {}",
@@ -142,14 +155,17 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                             warn!("co_name is null");
                         }
 
-                        stack[depth] = StackFrame {
-                            filename: fname_str.to_string(),
-                            // SAFETY: frame is still valid here as we hold the reference
-                            lineno: ffi::PyFrame_GetLineNumber(frame),
-                            bytei: 0,
-                            function_name,
-                        };
-                        depth += 1;
+                        // Skip frames that are from the importer machinery
+                        if !fname_str.starts_with('<') {
+                            stack[depth] = StackFrame {
+                                filename: intern(fname_str),
+                                // SAFETY: frame is still valid here as we hold the reference
+                                lineno: ffi::PyFrame_GetLineNumber(frame),
+                                bytei: 0,
+                                function_name,
+                            };
+                            depth += 1;
+                        }
                     }
                     Err(e) => warn!("Failed to convert filename to string: {}", e),
                 }

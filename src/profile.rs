@@ -47,7 +47,7 @@ pub fn get_profile_data() -> PyResult<Vec<(i64, i64, i64, i64, Vec<(String, i32)
             .stack0
             .iter()
             .take_while(|frame| !frame.filename.is_empty())
-            .map(|frame| (frame.filename.clone(), frame.lineno))
+            .map(|frame| (frame.filename.to_string(), frame.lineno))
             .collect();
 
         result.push((
@@ -196,7 +196,7 @@ pub fn write_heap_proto() -> PyResult<Vec<u8>> {
                 } else {
                     format!("{}:{}", frame.filename, frame.lineno)
                 };
-                (display, frame.filename.clone(), frame.lineno)
+                (display, frame.filename.to_string(), frame.lineno)
             };
 
             // Add filename to string table first

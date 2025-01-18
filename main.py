@@ -1,5 +1,10 @@
-import numpy as np
 from heap_profiler import get_profile_data, set_allocator, write_heap_proto
+
+set_allocator()
+import ssl
+import sys
+
+import numpy as np
 
 
 def setup_allocator():
@@ -78,6 +83,8 @@ def allocate_and_free():
 
 
 if __name__ == "__main__":
+    len(sys.argv)
+    ssl.create_default_context()
     setup_allocator()
     allocate_and_free()
     allocate_and_free()  # Run twice to test multiple allocations
