@@ -18,8 +18,11 @@ tracing-appender = "0.2.3"
 once_cell = "1.19.0"
 prost = "0.12"
 bytes = "1.5"
-lazy_static = "1.4.0"
+lazy_static = "1.4"
 hashbrown = "0.14"
+libc = "0.2"
+mach = { version = "0.3", features = ["deprecated"] }
+mach2 = "0.4"
 
 [build-dependencies]
 pyo3-build-config = "0.22.0"

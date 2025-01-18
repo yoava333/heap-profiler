@@ -4,6 +4,8 @@ use std::ffi::CStr;
 use std::hash::{Hash, Hasher};
 use tracing::{debug, warn};
 
+use crate::recursion_guard::PythonGCGuard;
+
 #[derive(Debug, Default, Clone)]
 pub struct StackFrame {
     pub filename: String,
@@ -33,6 +35,9 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
     let mut depth: usize = 0;
 
     Python::with_gil(|_py| {
+        // disable gc
+        let _gc_guard = PythonGCGuard::new();
+
         // SAFETY: PyGILState_GetThisThreadState is safe to call while holding the GIL
         let thread_state = unsafe { ffi::PyGILState_GetThisThreadState() };
         if thread_state.is_null() {

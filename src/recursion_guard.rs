@@ -28,3 +28,25 @@ impl Drop for MallocRecursionGuard {
         IN_MALLOC.with(|in_malloc| in_malloc.set(false));
     }
 }
+
+// GC Disable
+pub struct PythonGCGuard {}
+
+impl PythonGCGuard {
+    pub fn new() -> Self {
+        use pyo3_ffi::PyGC_Disable;
+        unsafe {
+            PyGC_Disable();
+        }
+        Self {}
+    }
+}
+
+impl Drop for PythonGCGuard {
+    fn drop(&mut self) {
+        use pyo3_ffi::PyGC_Enable;
+        unsafe {
+            PyGC_Enable();
+        }
+    }
+}

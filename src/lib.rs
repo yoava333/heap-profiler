@@ -1,7 +1,8 @@
-#![feature(no_sanitize)]
+// #![feature(no_sanitize)]
 
 // Main library file that re-exports and coordinates modules
 mod allocator;
+pub mod libc_hooks;
 mod metadata_store;
 mod profile;
 mod proto;
@@ -9,6 +10,8 @@ mod recursion_guard;
 mod stack;
 
 use pyo3::prelude::*;
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 
 pub use allocator::{set_allocator, MyAllocator};
 pub use profile::{get_profile_data, write_heap_proto, PROFILE_DATA};
@@ -16,9 +19,29 @@ pub use stack::{where_in_python, StackFrame};
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn heap_profiler(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(set_allocator, m)?)?;
-    m.add_function(wrap_pyfunction!(get_profile_data, m)?)?;
-    m.add_function(wrap_pyfunction!(write_heap_proto, m)?)?;
+fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Initialize tracing subscriber with a more verbose filter
+    std::env::set_var("RUST_LOG", "info");
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_target(true)
+        .init();
+
+    info!("Initializing heap profiler");
+    debug!("Setting up Python module");
+
+    m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
+    m.add_function(wrap_pyfunction!(profile::write_heap_proto, m)?)?;
+
+    unsafe {
+        info!("Enabling libc hooks");
+        libc_hooks::enable_libc_hooks();
+        info!("Libc hooks enabled");
+    }
+
     Ok(())
 }
