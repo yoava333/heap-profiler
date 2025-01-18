@@ -134,6 +134,9 @@ fn handle_free(ptr: *mut std::ffi::c_void) {
 }
 
 static mut ORIGINAL_MALLOC: *mut libc::c_void = std::ptr::null_mut();
+static mut ORIGINAL_FREE: *mut libc::c_void = std::ptr::null_mut();
+static mut ORIGINAL_REALLOC: *mut libc::c_void = std::ptr::null_mut();
+static mut ORIGINAL_CALLOC: *mut libc::c_void = std::ptr::null_mut();
 
 #[no_mangle]
 unsafe extern "C" fn handle_native_malloc(size: libc::size_t) -> *mut libc::c_void {
@@ -141,14 +144,98 @@ unsafe extern "C" fn handle_native_malloc(size: libc::size_t) -> *mut libc::c_vo
     let original: unsafe extern "C" fn(libc::size_t) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_MALLOC);
     let result = original(size);
+
+    if !_guard.was_in_malloc() && !result.is_null() {
+        info!(
+            operation = "malloc",
+            ptr = ?format!("{:#x}", result as usize),
+            "Allocating memory"
+        );
+        handle_malloc(result, size);
+    }
+
+    drop(_guard);
+
     result
 }
 
-#[pyfunction]
-pub fn set_allocator() -> PyResult<()> {
+#[no_mangle]
+unsafe extern "C" fn handle_native_free(ptr: *mut libc::c_void) {
+    let guard = MallocRecursionGuard::new();
+
+    // We need to call our API before we call the real free implementation
+    // to make sure that the pointer is not reused in-between.
+    if !guard.was_in_malloc() {
+        handle_free(ptr);
+    }
+
+    info!(
+        operation = "free",
+        ptr = ?format!("{:#x}", ptr as usize),
+        "Freeing memory"
+    );
+
+    // Call the original free implementation
+    let original: unsafe extern "C" fn(*mut libc::c_void) = std::mem::transmute(ORIGINAL_FREE);
+    original(ptr);
+
+    drop(guard);
+}
+
+#[no_mangle]
+unsafe extern "C" fn handle_native_calloc(
+    nelem: libc::size_t,
+    elsize: libc::size_t,
+) -> *mut libc::c_void {
+    let guard = MallocRecursionGuard::new();
+    let original: unsafe extern "C" fn(libc::size_t, libc::size_t) -> *mut libc::c_void =
+        std::mem::transmute(ORIGINAL_CALLOC);
+    let result = original(nelem, elsize);
+
+    if !guard.was_in_malloc() {
+        if !result.is_null() {
+            handle_malloc(result, nelem * elsize);
+        }
+    }
+
+    drop(guard);
+
+    result
+}
+
+#[no_mangle]
+unsafe extern "C" fn handle_native_realloc(
+    ptr: *mut libc::c_void,
+    size: libc::size_t,
+) -> *mut libc::c_void {
+    let guard = MallocRecursionGuard::new();
+    if !guard.was_in_malloc() {
+        if !ptr.is_null() {
+            handle_free(ptr);
+        }
+    }
+    let original: unsafe extern "C" fn(*mut libc::c_void, libc::size_t) -> *mut libc::c_void =
+        std::mem::transmute(ORIGINAL_REALLOC);
+    let result = original(ptr, size);
+
+    if !guard.was_in_malloc() {
+        if !result.is_null() {
+            handle_malloc(result, size);
+        }
+    }
+
+    drop(guard);
+
+    result
+}
+
+fn init_native_hooks() {
     unsafe {
         let handle = libc::dlopen(std::ptr::null(), 1); // RTLD_LAZY
         ORIGINAL_MALLOC = libc::dlsym(handle, b"malloc\0".as_ptr() as *const _);
+        ORIGINAL_FREE = libc::dlsym(handle, b"free\0".as_ptr() as *const _);
+        ORIGINAL_REALLOC = libc::dlsym(handle, b"realloc\0".as_ptr() as *const _);
+        ORIGINAL_CALLOC = libc::dlsym(handle, b"calloc\0".as_ptr() as *const _);
         libc::dlclose(handle);
     }
     // Enable native hooks
@@ -160,13 +247,27 @@ pub fn set_allocator() -> PyResult<()> {
             original_fn: ORIGINAL_MALLOC as *mut libc::c_void,
             intercept_fn: handle_native_malloc as *mut libc::c_void,
         });
+        patcher.register_hook(Hook {
+            symbol_name: "free",
+            original_fn: ORIGINAL_FREE as *mut libc::c_void,
+            intercept_fn: handle_native_free as *mut libc::c_void,
+        });
+        patcher.register_hook(Hook {
+            symbol_name: "realloc",
+            original_fn: ORIGINAL_REALLOC as *mut libc::c_void,
+            intercept_fn: handle_native_realloc as *mut libc::c_void,
+        });
+        patcher.register_hook(Hook {
+            symbol_name: "calloc",
+            original_fn: ORIGINAL_CALLOC as *mut libc::c_void,
+            intercept_fn: handle_native_calloc as *mut libc::c_void,
+        });
     }
     patcher.apply_hooks();
+}
 
-    unsafe {
-        let _ptr = libc::malloc(100);
-    }
-
+#[pyfunction]
+pub fn set_allocator() -> PyResult<()> {
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();
@@ -238,6 +339,8 @@ pub fn set_allocator() -> PyResult<()> {
         );
     }
 
+    init_native_hooks();
+
     Ok(())
 }
 
@@ -248,11 +351,13 @@ fn is_python_initialized() -> bool {
 
 // Memory allocation functions
 extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void {
+    // We can get to a situation where we're allocating memory before Python is initialized
+    // But this is the Python allocator, you say, how can that happen?
+    // Well, when python is shutting down, is disables PyIsInitialized, which in turn causes
+    // pyo3 to panic.
     if !is_python_initialized() {
         return std::ptr::null_mut();
     }
-
-    info!(operation = "malloc", size = size, "Allocating memory");
 
     // Ensure all allocation requests are multiples of eight,
     // mirroring the actual allocation sizes employed by pymalloc
@@ -287,10 +392,6 @@ extern "C" fn my_calloc(
     nelem: usize,
     elsize: usize,
 ) -> *mut std::ffi::c_void {
-    if !is_python_initialized() {
-        return std::ptr::null_mut();
-    }
-
     let nbytes = nelem * elsize;
     let ptr = my_malloc(ctx, nbytes);
     if ptr.is_null() {

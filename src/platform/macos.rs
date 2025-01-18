@@ -281,7 +281,7 @@ unsafe fn patch_symbols_in_section(
             debug!("Found symbol: {} at {:p}", symbol_name, current_fn);
 
             for hook in hooks {
-                if symbol_name.ends_with(hook.symbol_name) {
+                if symbol_name == hook.symbol_name {
                     debug!("Found target symbol {} to patch!", hook.symbol_name);
                     patch_symbol_addr(hook, symbol_ptr, restore_original);
                 }
@@ -320,6 +320,10 @@ unsafe fn patch_stubs(
 
                 for hook in hooks {
                     if symbol_name.ends_with(hook.symbol_name) {
+                        warn!(
+                            "symbol_name = {}, hook.symbol_name = {}!",
+                            symbol_name, hook.symbol_name
+                        );
                         debug!("Found target symbol {} to patch in stub!", hook.symbol_name);
                         patch_symbol_addr(hook, symbol_addr as *mut *mut c_void, restore_original);
                     }
@@ -349,7 +353,10 @@ unsafe fn patch_symbols_in_shared_object(
         patched.insert(image_str.clone());
     }
 
-    if image_str.contains("libdyld.dylib") || image_str.contains("/usr/lib/system/") {
+    if image_str.contains("libdyld.dylib")
+        || image_str.contains("/usr/lib/system/")
+        || image_str.contains("heap_profiler")
+    {
         return;
     }
 

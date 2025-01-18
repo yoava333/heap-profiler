@@ -1,8 +1,13 @@
+import numpy as np
 from heap_profiler import get_profile_data, set_allocator, write_heap_proto
 
 
 def setup_allocator():
     set_allocator()
+
+
+def np_alloc():
+    np.ones((1024, 1024, 100))
 
 
 def allocate_and_free():
@@ -61,6 +66,14 @@ def allocate_and_free():
     # Write updated heap profile
     profile_data = write_heap_proto()
     with open("heap_after_free.prof", "wb") as f:
+        f.write(profile_data)
+
+    np_alloc()
+
+    gc.collect()
+
+    profile_data = write_heap_proto()
+    with open("heap_after_np_alloc.prof", "wb") as f:
         f.write(profile_data)
 
 

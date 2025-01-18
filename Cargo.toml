@@ -21,8 +21,6 @@ bytes = "1.5"
 lazy_static = "1.4"
 hashbrown = "0.14"
 libc = "0.2"
-mach = { version = "0.3", features = ["deprecated"] }
-mach2 = "0.4"
 
 [build-dependencies]
 pyo3-build-config = "0.22.0"
