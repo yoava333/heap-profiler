@@ -1,13 +1,12 @@
 use crate::metadata_store::{self, AllocationMetadata};
+use crate::platform::{Patcher, PlatformPatcher};
 use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA};
 use crate::stack::{calculate_stack_hash, where_in_python, StackFrame};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use rand::Rng;
 use std::cell::Cell;
-use std::sync::Once;
 use tracing::{info, warn};
-use tracing_subscriber::{prelude::*, EnvFilter};
 
 use crate::recursion_guard::MallocRecursionGuard;
 
@@ -16,8 +15,6 @@ const MIN_SAMPLE_SIZE: usize = 256 * 1024; // 256KB - always sample allocations 
 
 // aka "SMALL_REQUEST_THRESHOLD" in cpython/Objects/obmalloc.c
 const PYMALLOC_MAX_SIZE: usize = 512;
-
-static INIT_TRACING: Once = Once::new();
 
 thread_local! {
     static NEXT_SAMPLE: Cell<i32> = Cell::new(0);
@@ -136,16 +133,39 @@ fn handle_free(ptr: *mut std::ffi::c_void) {
     }
 }
 
+static mut ORIGINAL_MALLOC: *mut libc::c_void = std::ptr::null_mut();
+
+#[no_mangle]
+unsafe extern "C" fn handle_native_malloc(size: libc::size_t) -> *mut libc::c_void {
+    let _guard = MallocRecursionGuard::new();
+    let original: unsafe extern "C" fn(libc::size_t) -> *mut libc::c_void =
+        std::mem::transmute(ORIGINAL_MALLOC);
+    let result = original(size);
+    result
+}
+
 #[pyfunction]
 pub fn set_allocator() -> PyResult<()> {
-    // Initialize tracing only once
-    INIT_TRACING.call_once(|| {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer())
-            .with(EnvFilter::from_default_env())
-            .try_init()
-            .ok();
-    });
+    unsafe {
+        let handle = libc::dlopen(std::ptr::null(), 1); // RTLD_LAZY
+        ORIGINAL_MALLOC = libc::dlsym(handle, b"malloc\0".as_ptr() as *const _);
+        libc::dlclose(handle);
+    }
+    // Enable native hooks
+    let mut patcher = PlatformPatcher::new("heap_profiler".to_string());
+    use crate::platform::Hook;
+    unsafe {
+        patcher.register_hook(Hook {
+            symbol_name: "malloc",
+            original_fn: ORIGINAL_MALLOC as *mut libc::c_void,
+            intercept_fn: handle_native_malloc as *mut libc::c_void,
+        });
+    }
+    patcher.apply_hooks();
+
+    unsafe {
+        let _ptr = libc::malloc(100);
+    }
 
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
@@ -221,8 +241,17 @@ pub fn set_allocator() -> PyResult<()> {
     Ok(())
 }
 
+#[inline]
+fn is_python_initialized() -> bool {
+    unsafe { ffi::Py_IsInitialized() != 0 }
+}
+
 // Memory allocation functions
 extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void {
+    if !is_python_initialized() {
+        return std::ptr::null_mut();
+    }
+
     info!(operation = "malloc", size = size, "Allocating memory");
 
     // Ensure all allocation requests are multiples of eight,
@@ -258,6 +287,10 @@ extern "C" fn my_calloc(
     nelem: usize,
     elsize: usize,
 ) -> *mut std::ffi::c_void {
+    if !is_python_initialized() {
+        return std::ptr::null_mut();
+    }
+
     let nbytes = nelem * elsize;
     let ptr = my_malloc(ctx, nbytes);
     if ptr.is_null() {
@@ -274,6 +307,10 @@ extern "C" fn my_realloc(
     ptr: *mut std::ffi::c_void,
     new_size: usize,
 ) -> *mut std::ffi::c_void {
+    if !is_python_initialized() {
+        return std::ptr::null_mut();
+    }
+
     info!(
         operation = "realloc",
         ptr = ?format!("{:#x}", ptr as usize),
@@ -314,7 +351,7 @@ extern "C" fn my_realloc(
 }
 
 extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
-    if ptr.is_null() {
+    if !is_python_initialized() || ptr.is_null() {
         return;
     }
 
