@@ -287,7 +287,7 @@ unsafe extern "C" fn handle_native_dlopen(
     let _guard = MallocRecursionGuard::new();
     let original: unsafe extern "C" fn(*const libc::c_char, libc::c_int) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_DLOPEN);
-    let mut ret = std::ptr::null_mut();
+    let mut ret: *mut libc::c_void = std::ptr::null_mut();
 
     #[cfg(target_os = "linux")]
     {

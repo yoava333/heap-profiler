@@ -462,6 +462,7 @@ unsafe fn patch_symbols_in_all_shared_objects(
         let image_name = CStr::from_ptr(name_ptr);
         if image_name.to_string_lossy().contains("libdyld.dylib")
             || image_name.to_string_lossy().contains("/usr/lib/system/")
+            || image_name.to_string_lossy().contains("heap_profiler")
         {
             continue;
         }
