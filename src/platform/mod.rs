@@ -24,5 +24,6 @@ pub trait Patcher {
     fn new(self_name: String) -> Self;
     fn register_hook(&mut self, hook: Hook);
     fn apply_hooks(&mut self);
+    #[allow(dead_code)]
     fn restore_hooks(&mut self);
 }
