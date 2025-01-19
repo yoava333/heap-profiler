@@ -22,7 +22,6 @@ pub use stack::{where_in_python, StackFrame};
 #[pymodule]
 fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize tracing subscriber with a more verbose filter
-    std::env::set_var("RUST_LOG", "warn");
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_file(true)

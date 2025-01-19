@@ -34,8 +34,9 @@ pub struct PythonGCGuard {}
 
 impl PythonGCGuard {
     pub fn new() -> Self {
-        use pyo3_ffi::PyGC_Disable;
+        #[cfg(Py_3_10)]
         unsafe {
+            use pyo3_ffi::PyGC_Disable;
             PyGC_Disable();
         }
         Self {}
@@ -44,8 +45,9 @@ impl PythonGCGuard {
 
 impl Drop for PythonGCGuard {
     fn drop(&mut self) {
-        use pyo3_ffi::PyGC_Enable;
+        #[cfg(Py_3_10)]
         unsafe {
+            use pyo3_ffi::PyGC_Enable;
             PyGC_Enable();
         }
     }
