@@ -7,15 +7,15 @@ import sys
 import numpy as np
 
 
-def setup_allocator():
+def setup_allocator() -> None:
     start_tracing()
 
 
-def np_alloc():
+def np_alloc() -> None:
     np.ones((1024, 1024, 100))
 
 
-def allocate_and_free():
+def allocate_and_free() -> None:
     # Allocate multiple objects of different sizes
     objects = []
     for i in range(10):
