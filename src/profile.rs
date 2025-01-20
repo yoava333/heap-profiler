@@ -5,6 +5,7 @@ use lazy_static::lazy_static;
 use prost::Message;
 use pyo3::prelude::*;
 use std::sync::Mutex;
+use crate::ProfileEntry;
 
 // Constants for sampling
 pub const DEFAULT_SAMPLE_RATE: i32 = 512 * 1024; // 512KB
@@ -35,8 +36,12 @@ impl MemProfileRecord {
     }
 }
 
+/// get_profile_data()
+/// --
+///
+/// This function returns the heap profile data as a list of tuples.
 #[pyfunction]
-pub fn get_profile_data() -> PyResult<Vec<(i64, i64, i64, i64, Vec<(String, i32)>)>> {
+pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
     let profile_data = PROFILE_DATA.lock().map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
     })?;
@@ -50,20 +55,24 @@ pub fn get_profile_data() -> PyResult<Vec<(i64, i64, i64, i64, Vec<(String, i32)
             .map(|frame| (frame.filename.to_string(), frame.lineno))
             .collect();
 
-        result.push((
-            record.alloc_bytes,
-            record.free_bytes,
-            record.alloc_objects,
-            record.free_objects,
+        result.push(ProfileEntry {
+            alloc_bytes: record.alloc_bytes,
+            free_bytes: record.free_bytes,
+            alloc_objects: record.alloc_objects,
+            free_objects: record.free_objects,
             stack_frames,
-        ));
+        });
     }
 
     Ok(result)
 }
 
+/// pprof_heap()
+/// --
+///
+/// This function returns the heap profile data as a pprof-compatible binary format.
 #[pyfunction]
-pub fn write_heap_proto() -> PyResult<Vec<u8>> {
+pub fn get_pprof_data() -> PyResult<Vec<u8>> {
     let profile_data = PROFILE_DATA.lock().map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
     })?;

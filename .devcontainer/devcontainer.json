@@ -20,6 +20,6 @@
     }
   },
   "mounts": [
-    "source=/Users/yoavalon/repos/pyo3,target=/repos/pyo3,type=bind,consistency=cached"
+    "type=bind,source=${localEnv:HOME}/.ssh,target=/vscode/.ssh,readonly"
   ]
 }

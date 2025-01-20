@@ -289,123 +289,12 @@ unsafe extern "C" fn handle_native_dlopen(
         std::mem::transmute(ORIGINAL_DLOPEN);
     let mut ret: *mut libc::c_void = std::ptr::null_mut();
 
-    #[cfg(target_os = "linux")]
-    {
-        if !filename.is_null() {
-            let filename_str = std::ffi::CStr::from_ptr(filename).to_bytes();
-            if !filename_str.is_empty() && !filename_str.contains(&b'/') {
-                // Get caller's return address using inline assembly
-                let return_addr: *mut libc::c_void;
-                #[cfg(target_arch = "aarch64")]
-                {
-                    std::arch::asm!(
-                        "mov {}, x30",  // x30 is the link register on aarch64
-                        out(reg) return_addr,
-                        options(nostack, preserves_flags)
-                    );
-                }
-                #[cfg(target_arch = "x86_64")]
-                {
-                    std::arch::asm!(
-                        "mov {}, [rbp + 8]",  // Return address is stored at rbp + 8
-                        out(reg) return_addr,
-                        options(nostack, preserves_flags)
-                    );
-                }
-                #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-                {
-                    return_addr = std::ptr::null_mut();
-                }
-
-                if !return_addr.is_null() {
-                    let mut info: libc::Dl_info = std::mem::zeroed();
-                    if dladdr(return_addr, &mut info) != 0 {
-                        let dlname = info.dli_fname;
-                        let mut is_main = false;
-
-                        // Check if we're being called from main executable
-                        let self_handle = original(std::ptr::null(), RTLD_LAZY | RTLD_NOLOAD);
-                        if !self_handle.is_null() {
-                            let main_sym = libc::dlsym(self_handle, b"main\0".as_ptr() as *const _);
-                            let mut main_info: libc::Dl_info = std::mem::zeroed();
-
-                            if !main_sym.is_null()
-                                && dladdr(main_sym as *mut _, &mut main_info) != 0
-                            {
-                                if !main_info.dli_fname.is_null() && !info.dli_fname.is_null() {
-                                    let main_fname = std::ffi::CStr::from_ptr(main_info.dli_fname);
-                                    let info_fname = std::ffi::CStr::from_ptr(info.dli_fname);
-                                    if main_fname.to_bytes() == info_fname.to_bytes() {
-                                        is_main = true;
-                                    }
-                                }
-                            }
-                            let _ = original(self_handle as *const libc::c_char, RTLD_LAZY);
-                        }
-
-                        let caller_name = if is_main { std::ptr::null() } else { dlname };
-                        let caller = original(caller_name, RTLD_LAZY | RTLD_NOLOAD);
-
-                        if !caller.is_null() {
-                            let mut size = DlSerInfo {
-                                dls_size: DlSerInfo::base_size(),
-                                dls_cnt: 0,
-                                dls_serpath: [],
-                            };
-
-                            if dlinfo(
-                                caller,
-                                RTLD_DI_SERINFOSIZE,
-                                &mut size as *mut DlSerInfo as *mut libc::c_void,
-                            ) == 0
-                            {
-                                let layout = std::alloc::Layout::from_size_align(
-                                    DlSerInfo::total_size(size.dls_cnt as usize),
-                                    std::mem::align_of::<DlSerInfo>(),
-                                )
-                                .unwrap();
-                                let paths = std::alloc::alloc(layout) as *mut DlSerInfo;
-                                *paths = size;
-
-                                if dlinfo(caller, RTLD_DI_SERINFO, paths as *mut libc::c_void) == 0
-                                {
-                                    let paths_slice = (*paths).get_paths();
-
-                                    for path in paths_slice {
-                                        if !path.dls_name.is_null() {
-                                            let name = std::ffi::CStr::from_ptr(path.dls_name);
-                                            if !name.to_bytes().is_empty() {
-                                                let mut dir =
-                                                    String::from_utf8_lossy(name.to_bytes())
-                                                        .into_owned();
-                                                if !dir.ends_with('/') {
-                                                    dir.push('/');
-                                                }
-                                                dir.push_str(
-                                                    std::ffi::CStr::from_ptr(filename)
-                                                        .to_str()
-                                                        .unwrap(),
-                                                );
-
-                                                let dir_cstring =
-                                                    std::ffi::CString::new(dir).unwrap();
-                                                ret = original(dir_cstring.as_ptr(), flag);
-                                                if !ret.is_null() {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                std::alloc::dealloc(paths as *mut u8, layout);
-                            }
-                            let _ = original(caller as *const libc::c_char, RTLD_LAZY);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // TODO: support glibc dlopen
+    // In GLIBC, dlopen() will respect the RPATH/RUNPATH of the caller when searching for the
+    // library, which won't work if we intercept dlopen() as we will be the caller. This means that
+    // callers that rely on RUNPATH to find their dependencies will fail to load. To work around
+    // this, we need to manually find our caller and walk the linker search path to know what we need
+    // to dlopen().
 
     // Fallback if we found nothing
     if ret.is_null() {
@@ -477,7 +366,7 @@ fn init_native_hooks() {
 }
 
 #[pyfunction]
-pub fn set_allocator() -> PyResult<()> {
+pub fn start_tracing() -> PyResult<()> {
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();

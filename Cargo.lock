@@ -289,6 +289,7 @@ dependencies = [
 [[package]]
 name = "pyo3"
 version = "0.23.3"
+source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "cfg-if",
  "indoc",
@@ -305,6 +306,7 @@ dependencies = [
 [[package]]
 name = "pyo3-build-config"
 version = "0.23.3"
+source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "once_cell",
  "target-lexicon 0.13.1",
@@ -323,6 +325,7 @@ dependencies = [
 [[package]]
 name = "pyo3-ffi"
 version = "0.23.3"
+source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "libc",
  "pyo3-build-config 0.23.3",
@@ -331,6 +334,7 @@ dependencies = [
 [[package]]
 name = "pyo3-macros"
 version = "0.23.3"
+source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "proc-macro2",
  "pyo3-macros-backend",
@@ -341,6 +345,7 @@ dependencies = [
 [[package]]
 name = "pyo3-macros-backend"
 version = "0.23.3"
+source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "heck",
  "proc-macro2",
