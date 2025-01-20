@@ -19,57 +19,13 @@ static mut ORIGINAL_REALLOC: *mut libc::c_void = std::ptr::null_mut();
 static mut ORIGINAL_CALLOC: *mut libc::c_void = std::ptr::null_mut();
 static mut ORIGINAL_DLOPEN: *mut libc::c_void = std::ptr::null_mut();
 
-// Constants for sampling and allocation
-const MIN_SAMPLE_SIZE: usize = 256 * 1024; // 256KB - always sample allocations larger than this
-
 // aka "SMALL_REQUEST_THRESHOLD" in cpython/Objects/obmalloc.c
 const PYMALLOC_MAX_SIZE: usize = 512;
 
-// Add these constants at the top of the file with other constants
-const RTLD_LAZY: libc::c_int = 1;
-const RTLD_NOLOAD: libc::c_int = 4;
-const RTLD_DI_SERINFOSIZE: libc::c_int = 5;
-const RTLD_DI_SERINFO: libc::c_int = 6;
+const ARENA_ALLOCATOR_ENABLED: bool = false;
 
 lazy_static! {
     static ref GLOBAL_PATCHER: Mutex<Option<PlatformPatcher>> = Mutex::new(None);
-}
-
-#[repr(C)]
-struct DlSerPath {
-    dls_name: *const libc::c_char,
-    dls_flags: libc::c_ulong,
-}
-
-#[repr(C)]
-struct DlSerInfo {
-    dls_size: libc::size_t,
-    dls_cnt: libc::c_uint,
-    dls_serpath: [DlSerPath; 0],
-}
-
-impl DlSerInfo {
-    unsafe fn get_paths(&self) -> &[DlSerPath] {
-        let paths_ptr = (self as *const DlSerInfo).add(1) as *const DlSerPath;
-        std::slice::from_raw_parts(paths_ptr, self.dls_cnt as usize)
-    }
-
-    fn base_size() -> usize {
-        std::mem::size_of::<DlSerInfo>()
-    }
-
-    fn total_size(path_count: usize) -> usize {
-        Self::base_size() + path_count * std::mem::size_of::<DlSerPath>()
-    }
-}
-
-extern "C" {
-    fn dlinfo(
-        handle: *mut libc::c_void,
-        request: libc::c_int,
-        info: *mut libc::c_void,
-    ) -> libc::c_int;
-    fn dladdr(addr: *mut libc::c_void, info: *mut libc::Dl_info) -> libc::c_int;
 }
 
 thread_local! {
@@ -229,7 +185,7 @@ unsafe extern "C" fn handle_native_free(ptr: *mut libc::c_void) {
     info!(
         operation = "free",
         ptr = ?format!("{:#x}", ptr as usize),
-        "Freeing memory"
+        "Freeing native memory"
     );
 
     // Call the original free implementation
@@ -383,6 +339,10 @@ pub fn start_tracing(sample_rate: i32) -> PyResult<()> {
     }
     SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
 
+    if ARENA_ALLOCATOR_ENABLED {
+        setup_arena_allocator();
+    }
+
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();
@@ -494,6 +454,12 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
 
     // SAFETY: original_allocator.malloc is guaranteed to be Some
     let ptr = (original_allocator.malloc.unwrap())(original_allocator.ctx, new_size);
+    info!(
+        operation = "malloc",
+        size = new_size,
+        ptr = ?format!("{:#x}", ptr as usize),
+        "Allocating memory"
+    );
 
     if !ptr.is_null() {
         handle_malloc(ptr, size);
@@ -527,19 +493,18 @@ extern "C" fn my_realloc(
         return std::ptr::null_mut();
     }
 
-    info!(
-        operation = "realloc",
-        ptr = ?format!("{:#x}", ptr as usize),
-        new_size = new_size,
-        "Reallocating memory"
-    );
-
     let new_size = if new_size < 8 { 8 } else { new_size };
 
     if ptr.is_null() {
         return my_malloc(ctx, new_size);
     }
 
+    info!(
+        operation = "realloc",
+        ptr = ?format!("{:#x}", ptr as usize),
+        new_size = new_size,
+        "Reallocating memory"
+    );
     let guard = MallocRecursionGuard::new();
 
     // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
@@ -581,8 +546,94 @@ extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
     let original_allocator = my_allocator.original_allocator;
 
+    info!(
+        operation = "free",
+        ptr = ?format!("{:#x}", ptr as usize),
+        "Freeing memory"
+    );
+
     handle_free(ptr);
 
     // SAFETY: original_allocator.free is guaranteed to be Some
     (original_allocator.free.unwrap())(original_allocator.ctx, ptr);
+}
+
+fn setup_arena_allocator() {
+    // Set up arena allocator
+    unsafe {
+        let mut arena_allocator = ffi::PyObjectArenaAllocator::default();
+        ffi::PyObject_GetArenaAllocator(&mut arena_allocator);
+
+        let my_arena_allocator = Box::new(MyArenaAllocator::new(arena_allocator));
+        let mut new_arena_allocator = my_arena_allocator.get_allocator();
+        new_arena_allocator.ctx =
+            Box::leak(my_arena_allocator) as *mut MyArenaAllocator as *mut std::ffi::c_void;
+
+        ffi::PyObject_SetArenaAllocator(&mut new_arena_allocator);
+    }
+}
+
+#[derive(Clone)]
+pub struct MyArenaAllocator {
+    pub original_allocator: ffi::PyObjectArenaAllocator,
+}
+
+impl MyArenaAllocator {
+    pub fn new(original_allocator: ffi::PyObjectArenaAllocator) -> Self {
+        Self { original_allocator }
+    }
+
+    pub fn get_allocator(&self) -> ffi::PyObjectArenaAllocator {
+        ffi::PyObjectArenaAllocator {
+            ctx: std::ptr::null_mut(),
+            alloc: Some(my_arena_alloc),
+            free: Some(my_arena_free),
+        }
+    }
+}
+
+extern "C" fn my_arena_alloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ffi::c_void {
+    if !is_python_initialized() {
+        return std::ptr::null_mut();
+    }
+
+    let _guard = MallocRecursionGuard::new();
+
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyArenaAllocator
+    let my_allocator = unsafe { &mut *(ctx as *mut MyArenaAllocator) };
+    let original_allocator = my_allocator.original_allocator;
+
+    // SAFETY: original_allocator.alloc is guaranteed to be Some
+    let ptr = (original_allocator.alloc.unwrap())(original_allocator.ctx, size);
+
+    warn!(
+        operation = "arena_alloc",
+        size = size,
+        ptr = ?format!("{:#x}", ptr as usize),
+        "Allocating arena memory"
+    );
+
+    ptr
+}
+
+extern "C" fn my_arena_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void, size: usize) {
+    if !is_python_initialized() || ptr.is_null() {
+        return;
+    }
+
+    let _guard = MallocRecursionGuard::new();
+
+    // SAFETY: ctx is guaranteed to be a valid pointer to MyArenaAllocator
+    let my_allocator = unsafe { &mut *(ctx as *mut MyArenaAllocator) };
+    let original_allocator = my_allocator.original_allocator;
+
+    warn!(
+        operation = "arena_free",
+        ptr = ?format!("{:#x}", ptr as usize),
+        size = size,
+        "Freeing arena memory"
+    );
+
+    // SAFETY: original_allocator.free is guaranteed to be Some
+    (original_allocator.free.unwrap())(original_allocator.ctx, ptr, size);
 }

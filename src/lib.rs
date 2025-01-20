@@ -17,7 +17,7 @@ pub use profile::{get_pprof_data, get_profile_data, PROFILE_DATA};
 pub use stack::{where_in_python, StackFrame};
 
 #[pyclass(get_all)]
-struct ProfileEntry {
+pub struct ProfileEntry {
     alloc_bytes: i64,
     free_bytes: i64,
     alloc_objects: i64,
@@ -42,10 +42,11 @@ fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_file(true)
+        .with_ansi(false)
         .with_line_number(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
         .with_target(true)
+        .json()
+        .with_writer(std::io::stderr)
         .try_init();
 
     debug!("Initializing heap profiler");
