@@ -1,9 +1,9 @@
 import pyperformance.cli
-from heap_profiler import set_allocator, write_heap_proto
+from heap_profiler import get_pprof_data, start_tracing
 
 if __name__ == "__main__":
-    set_allocator()
+    start_tracing()
     pyperformance.cli.main()
-    data = write_heap_proto()
+    data = get_pprof_data()
     with open("heap.prof", "wb") as f:
         f.write(data)

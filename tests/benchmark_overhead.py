@@ -10,7 +10,7 @@ def run_pyperformance(with_profiler=False):
     if with_profiler:
         import heap_profiler
 
-        heap_profiler.set_allocator()
+        heap_profiler.start_tracing()
 
     # Select memory-intensive benchmarks
     benchmarks = [
@@ -113,7 +113,7 @@ def run_custom_benchmark(with_profiler=False):
         try:
             import heap_profiler
 
-            heap_profiler.set_allocator()
+            heap_profiler.start_tracing()
             print("Successfully enabled heap profiler")
         except Exception as e:
             print(f"Error enabling heap profiler: {e}")

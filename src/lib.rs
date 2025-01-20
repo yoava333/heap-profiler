@@ -13,11 +13,10 @@ use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
 pub use allocator::{start_tracing, MyAllocator};
-pub use profile::{get_profile_data, get_pprof_data, PROFILE_DATA};
+pub use profile::{get_pprof_data, get_profile_data, PROFILE_DATA};
 pub use stack::{where_in_python, StackFrame};
 
-
-#[pyclass]
+#[pyclass(get_all)]
 struct ProfileEntry {
     alloc_bytes: i64,
     free_bytes: i64,
@@ -51,6 +50,7 @@ fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     debug!("Initializing heap profiler");
 
+    m.add_class::<ProfileEntry>()?;
     m.add_function(wrap_pyfunction!(allocator::start_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_pprof_data, m)?)?;

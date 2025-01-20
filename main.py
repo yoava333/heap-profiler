@@ -1,6 +1,6 @@
-from heap_profiler import get_profile_data, set_allocator, write_heap_proto
+from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 
-set_allocator()
+start_tracing()
 import ssl
 import sys
 
@@ -8,7 +8,7 @@ import numpy as np
 
 
 def setup_allocator():
-    set_allocator()
+    start_tracing()
 
 
 def np_alloc():
@@ -25,22 +25,20 @@ def allocate_and_free():
 
     # Print profile data after allocations
     print("\nProfile data after allocations:")
-    for (
-        alloc_bytes,
-        free_bytes,
-        alloc_objects,
-        free_objects,
-        stack,
-    ) in get_profile_data():
+    for profile_entry in get_profile_data():
         print("\nAllocation point:")
-        print(f"Allocated: {alloc_bytes} bytes ({alloc_objects} objects)")
-        print(f"Freed: {free_bytes} bytes ({free_objects} objects)")
+        print(
+            f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)"
+        )
+        print(
+            f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
+        )
         print("Stack trace:")
-        for filename, lineno in stack:
+        for filename, lineno in profile_entry.stack_frames:
             print(f"  {filename}:{lineno}")
 
     # Write heap profile to file
-    profile_data = write_heap_proto()
+    profile_data = get_pprof_data()
     with open("heap.prof", "wb") as f:
         f.write(profile_data)
 
@@ -54,22 +52,20 @@ def allocate_and_free():
 
     # Print profile data after frees
     print("\nProfile data after frees:")
-    for (
-        alloc_bytes,
-        free_bytes,
-        alloc_objects,
-        free_objects,
-        stack,
-    ) in get_profile_data():
+    for profile_entry in get_profile_data():
         print("\nAllocation point:")
-        print(f"Allocated: {alloc_bytes} bytes ({alloc_objects} objects)")
-        print(f"Freed: {free_bytes} bytes ({free_objects} objects)")
+        print(
+            f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)"
+        )
+        print(
+            f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
+        )
         print("Stack trace:")
-        for filename, lineno in stack:
+        for filename, lineno in profile_entry.stack_frames:
             print(f"  {filename}:{lineno}")
 
     # Write updated heap profile
-    profile_data = write_heap_proto()
+    profile_data = get_pprof_data()
     with open("heap_after_free.prof", "wb") as f:
         f.write(profile_data)
 
@@ -77,7 +73,7 @@ def allocate_and_free():
 
     gc.collect()
 
-    profile_data = write_heap_proto()
+    profile_data = get_pprof_data()
     with open("heap_after_np_alloc.prof", "wb") as f:
         f.write(profile_data)
 

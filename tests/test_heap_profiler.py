@@ -5,7 +5,7 @@ import heap_profiler
 
 def test_basic_allocation():
     # Enable the heap profiler
-    heap_profiler.set_allocator()
+    heap_profiler.start_tracing()
 
     # Force a GC to clean up any existing allocations
     gc.collect()

@@ -1,14 +1,14 @@
 import gc
 
 import pytest
-from heap_profiler import set_allocator
+from heap_profiler import start_tracing
 
 
 @pytest.fixture(autouse=True)
 def setup_profiler():
     """Setup the profiler before each test and cleanup after"""
     # Setup
-    set_allocator()
+    start_tracing()
 
     # Run test
     yield
