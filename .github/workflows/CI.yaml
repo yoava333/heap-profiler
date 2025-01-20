@@ -37,6 +37,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run tests
+        env:
+          UV_PYTHON: "3.11"
+        run: |
+          set -xe
+          uv sync
+          uv run pytest ./tests
+
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:

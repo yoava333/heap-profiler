@@ -221,10 +221,6 @@ def test_no_memory_leaks():
     final_allocs = sum(entry.alloc_bytes for entry in profile_data)
     final_frees = sum(entry.free_bytes for entry in profile_data)
 
-    profile_bytes = get_pprof_data()
-    with open("profile.pb", "wb") as f:
-        f.write(profile_bytes)
-
     print(f"Final allocs: {final_allocs}")
     print(f"Final frees: {final_frees}")
 
