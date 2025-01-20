@@ -20,6 +20,7 @@ features = ["pyo3/extension-module"]
 
 [tool.uv]
 dev-dependencies = [
+    "protobuf>=5.29.3",
     "psutil>=6.1.1",
     "pyperformance>=1.11.0",
     "pytest>=8.3.4",

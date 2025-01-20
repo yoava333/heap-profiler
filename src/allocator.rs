@@ -1,12 +1,13 @@
 use crate::metadata_store::{self, AllocationMetadata};
 use crate::platform::{Patcher, PlatformPatcher};
-use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA};
+use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA, SAMPLE_RATE};
 use crate::stack::{calculate_stack_hash, where_in_python, StackFrame};
 use lazy_static::lazy_static;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use rand::Rng;
 use std::cell::Cell;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use tracing::{info, warn};
 
@@ -131,15 +132,21 @@ fn fast_exp_rand(mean: i32) -> i32 {
 
 fn should_sample(size: usize) -> bool {
     // Always sample large allocations
-    if size >= MIN_SAMPLE_SIZE {
+    let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed);
+    if size >= sample_rate as usize / 2 {
         return true;
+    }
+
+    // Fast path - avoid sampling very small allocations
+    if size < 64 {
+        return false;
     }
 
     NEXT_SAMPLE.with(|next| {
         let current = next.get();
         if current <= 0 {
             // Reset the counter with exponential distribution
-            next.set(fast_exp_rand(DEFAULT_SAMPLE_RATE));
+            next.set(fast_exp_rand(sample_rate));
             true
         } else {
             next.set(current - size as i32);
@@ -366,7 +373,16 @@ fn init_native_hooks() {
 }
 
 #[pyfunction]
-pub fn start_tracing() -> PyResult<()> {
+#[pyo3(signature = (sample_rate=DEFAULT_SAMPLE_RATE))]
+pub fn start_tracing(sample_rate: i32) -> PyResult<()> {
+    // Configure sample rate if provided
+    if sample_rate <= 0 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Sample rate must be positive",
+        ));
+    }
+    SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+
     let mut original_raw_allocator = get_default_allocator();
     let mut original_mem_allocator = get_default_allocator();
     let mut original_obj_allocator = get_default_allocator();
@@ -532,6 +548,10 @@ extern "C" fn my_realloc(
 
     // Use the original pointer for realloc
     let new_ptr = (original_allocator.realloc.unwrap())(original_allocator.ctx, ptr, new_size);
+
+    if !guard.was_in_malloc() {
+        handle_free(ptr);
+    }
 
     // Check if realloc failed
     if new_ptr.is_null() {

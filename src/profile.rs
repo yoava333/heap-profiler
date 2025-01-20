@@ -1,18 +1,20 @@
 use crate::proto::*;
 use crate::stack::StackFrame;
+use crate::ProfileEntry;
 use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use prost::Message;
 use pyo3::prelude::*;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
-use crate::ProfileEntry;
 
 // Constants for sampling
-pub const DEFAULT_SAMPLE_RATE: i32 = 512 * 1024; // 512KB
+pub const DEFAULT_SAMPLE_RATE: i32 = 512 * 1024; // 512Kib - reduced sampling frequency for better performance
 
 lazy_static! {
     pub static ref PROFILE_DATA: Mutex<HashMap<u64, MemProfileRecord>> =
         Mutex::new(HashMap::with_capacity(179_999));
+    pub static ref SAMPLE_RATE: AtomicI32 = AtomicI32::new(DEFAULT_SAMPLE_RATE);
 }
 
 #[derive(Debug)]
@@ -173,7 +175,7 @@ pub fn get_pprof_data() -> PyResult<Vec<u8>> {
             r#type: space_id,
             unit: bytes_id,
         }),
-        period: DEFAULT_SAMPLE_RATE as i64,
+        period: SAMPLE_RATE.load(Ordering::Relaxed) as i64,
         comment: Vec::new(),
         default_sample_type: 3, // inuse_space
     };
