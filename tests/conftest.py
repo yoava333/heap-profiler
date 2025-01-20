@@ -1,17 +1,12 @@
-import gc
-
 import pytest
-from heap_profiler import start_tracing
 
 
-@pytest.fixture(autouse=True)
-def setup_profiler():
-    """Setup the profiler before each test and cleanup after"""
-    # Setup
-    start_tracing()
+@pytest.fixture(scope="function", autouse=True)
+def setup_test_environment():
+    """Setup and teardown for each test."""
+    import heap_profiler
 
-    # Run test
-    yield
-
-    # Cleanup
-    gc.collect()  # Force garbage collection to clean up any remaining objects
+    heap_profiler.start_tracing()
+    # This fixture will run automatically for each test
+    yield  # This is where the test runs
+    # Any cleanup after the test would go here
