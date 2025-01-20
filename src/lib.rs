@@ -22,7 +22,7 @@ pub struct ProfileEntry {
     free_bytes: i64,
     alloc_objects: i64,
     free_objects: i64,
-    stack_frames: Vec<(String, i32)>,
+    stack_frames: Vec<(String, String, i32)>,
 }
 
 #[pymethods]
@@ -53,6 +53,7 @@ fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<ProfileEntry>()?;
     m.add_function(wrap_pyfunction!(allocator::start_tracing, m)?)?;
+    m.add_function(wrap_pyfunction!(allocator::get_sample_rate, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_pprof_data, m)?)?;
 

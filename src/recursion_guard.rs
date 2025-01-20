@@ -25,7 +25,7 @@ impl MallocRecursionGuard {
 
 impl Drop for MallocRecursionGuard {
     fn drop(&mut self) {
-        IN_MALLOC.with(|in_malloc| in_malloc.set(false));
+        IN_MALLOC.with(|in_malloc| in_malloc.set(self.was_in_malloc));
     }
 }
 

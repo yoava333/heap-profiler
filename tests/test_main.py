@@ -8,6 +8,10 @@ from proto.profile_pb2 import Profile
 
 pytestmark = pytest.mark.forked
 
+KiB = 1024
+MiB = 1024 * KiB
+GiB = 1024 * MiB
+
 
 def test_setup_allocator():
     """Test that setup_allocator initializes tracing properly."""
@@ -26,7 +30,7 @@ def test_setup_allocator():
 
 def test_small_allocations():
     """Test that many small allocations are captured."""
-    start_tracing()
+    start_tracing(sample_rate=128 * KiB)
     initial_data = get_profile_data()
     initial_allocs = sum(entry.alloc_bytes for entry in initial_data)
     initial_objects = sum(entry.alloc_objects for entry in initial_data)
@@ -62,24 +66,23 @@ def test_allocation_line_tracking():
     test_data = bytes(b"x" * 1024 * 1024)  # Line that we'll look for
 
     profile_data = get_profile_data()
-    relevant_entries = [
-        entry for entry in profile_data if entry.alloc_bytes >= 1024 * 1024
-    ]
+    relevant_entries = [entry for entry in profile_data if entry.alloc_bytes >= MiB]
 
     assert len(relevant_entries) > 0, "Should find our allocation"
     entry = relevant_entries[0]
 
     # Find the frame corresponding to this file
     this_file_frames = [
-        (filename, lineno)
-        for filename, lineno in entry.stack_frames
+        (filename, function_name, lineno)
+        for filename, function_name, lineno in entry.stack_frames
         if "test_main.py" in filename
+        and "test_allocation_line_tracking" in function_name
     ]
 
     assert len(this_file_frames) > 0, "Should find frame from this test file"
     # We don't test the exact line number since it could change with edits,
     # but we verify that we got a reasonable line number in this file
-    _, tracked_line = this_file_frames[0]
+    _, _, tracked_line = this_file_frames[0]
     assert 0 < tracked_line < 1000, "Should have a reasonable line number"
 
 
@@ -198,7 +201,7 @@ def test_profile_data_structure():
     # Verify stack frames structure
     assert len(entry.stack_frames) > 0, "Should have stack frames"
     frame = entry.stack_frames[0]
-    assert len(frame) == 2, "Frame should have filename and line number"
+    assert len(frame) == 3, "Frame should have filename, function name, and line number"
 
 
 def test_no_memory_leaks():

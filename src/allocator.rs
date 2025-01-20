@@ -329,6 +329,11 @@ fn init_native_hooks() {
 }
 
 #[pyfunction]
+pub fn get_sample_rate() -> i32 {
+    SAMPLE_RATE.load(Ordering::Relaxed)
+}
+
+#[pyfunction]
 #[pyo3(signature = (sample_rate=DEFAULT_SAMPLE_RATE))]
 pub fn start_tracing(sample_rate: i32) -> PyResult<()> {
     // Configure sample rate if provided
@@ -449,7 +454,7 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
     // SAFETY: ctx is guaranteed to be a valid pointer to MyAllocator
     let my_allocator = unsafe { &mut *(ctx as *mut MyAllocator) };
 
-    let _guard = MallocRecursionGuard::new();
+    let guard = MallocRecursionGuard::new();
     let original_allocator = my_allocator.original_allocator;
 
     // SAFETY: original_allocator.malloc is guaranteed to be Some
@@ -461,7 +466,7 @@ extern "C" fn my_malloc(ctx: *mut std::ffi::c_void, size: usize) -> *mut std::ff
         "Allocating memory"
     );
 
-    if !ptr.is_null() {
+    if !ptr.is_null() && !guard.was_in_malloc() {
         handle_malloc(ptr, size);
     }
 

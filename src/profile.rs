@@ -50,11 +50,17 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
 
     let mut result = Vec::new();
     for record in profile_data.values() {
-        let stack_frames: Vec<(String, i32)> = record
+        let stack_frames: Vec<(String, String, i32)> = record
             .stack0
             .iter()
             .take_while(|frame| !frame.filename.is_empty())
-            .map(|frame| (frame.filename.to_string(), frame.lineno))
+            .map(|frame| {
+                (
+                    frame.filename.to_string(),
+                    frame.function_name.to_string(),
+                    frame.lineno,
+                )
+            })
             .collect();
 
         result.push(ProfileEntry {
