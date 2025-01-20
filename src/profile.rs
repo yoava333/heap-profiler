@@ -5,6 +5,7 @@ use hashbrown::HashMap;
 use lazy_static::lazy_static;
 use prost::Message;
 use pyo3::prelude::*;
+use std::io::prelude::*;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
@@ -80,72 +81,94 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
 ///
 /// This function returns the heap profile data as a pprof-compatible binary format.
 #[pyfunction]
-pub fn get_pprof_data() -> PyResult<Vec<u8>> {
+#[pyo3(signature = (compress=false))]
+pub fn get_pprof_data(compress: bool) -> PyResult<Vec<u8>> {
     let profile_data = PROFILE_DATA.lock().map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
     })?;
 
+    //
+    // 1. Prepare string interner
+    //
+    // We'll store all strings in a single table and keep track of their IDs in a HashMap.
     let mut string_index_map = HashMap::new();
-    string_index_map.insert("".to_string(), 0i64);
-    let mut next_string_id = 1i64;
 
-    // Pre-register all strings we'll need
-    let alloc_objects_id = {
-        let s = "alloc_objects".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
+    // Helper to get or insert a string into the table
+    let mut string_table: Vec<String> = Vec::new();
+    // string_table[0] = "" is typical for pprof; so let's add it explicitly
+    string_table.push("".to_string());
+    string_index_map.insert("".to_string(), 0);
 
-    let count_id = {
-        let s = "count".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
+    let mut next_string_id = 1;
 
-    let alloc_space_id = {
-        let s = "alloc_space".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
+    fn get_string_id(
+        s: &str,
+        string_index_map: &mut HashMap<String, i64>,
+        string_table: &mut Vec<String>,
+        next_string_id: &mut i64,
+    ) -> i64 {
+        if let Some(&id) = string_index_map.get(s) {
+            id
+        } else {
+            let id = *next_string_id;
+            *next_string_id += 1;
+            string_index_map.insert(s.to_string(), id);
+            // Make sure the string_table can hold the new index
+            if string_table.len() <= id as usize {
+                string_table.resize(id as usize + 1, String::new());
+            }
+            string_table[id as usize] = s.to_string();
+            id
+        }
+    }
 
-    let bytes_id = {
-        let s = "bytes".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
+    // Pre-register the standard strings we know we'll need:
+    let alloc_objects_id = get_string_id(
+        "alloc_objects",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let count_id = get_string_id(
+        "count",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let alloc_space_id = get_string_id(
+        "alloc_space",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let bytes_id = get_string_id(
+        "bytes",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let inuse_objects_id = get_string_id(
+        "inuse_objects",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let inuse_space_id = get_string_id(
+        "inuse_space",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
+    let space_id = get_string_id(
+        "space",
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    );
 
-    let inuse_objects_id = {
-        let s = "inuse_objects".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
-
-    let inuse_space_id = {
-        let s = "inuse_space".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
-
-    let space_id = {
-        let s = "space".to_string();
-        let idx = next_string_id;
-        next_string_id += 1;
-        string_index_map.insert(s, idx);
-        idx
-    };
-
+    //
+    // 2. Initialize the Profile
+    //
     let mut profile = Profile {
         sample_type: vec![
             ValueType {
@@ -169,7 +192,8 @@ pub fn get_pprof_data() -> PyResult<Vec<u8>> {
         mapping: Vec::new(),
         location: Vec::new(),
         function: Vec::new(),
-        string_table: vec![], // Will be filled at the end
+        // We'll fill in the correct string_table at the end:
+        string_table: Vec::new(),
         drop_frames: 0,
         keep_frames: 0,
         time_nanos: std::time::SystemTime::now()
@@ -186,97 +210,132 @@ pub fn get_pprof_data() -> PyResult<Vec<u8>> {
         default_sample_type: 3, // inuse_space
     };
 
-    let mut next_location_id = 1u64;
-    let mut next_function_id = 1u64;
+    //
+    // 3. Dedup structures:
+    //
+    // We'll keep a map for (filename) -> mapping_id
+    let mut mapping_map: HashMap<String, u64> = HashMap::new();
 
-    // Process each profile record
+    // We'll keep a map for (filename_id, function_name_id, start_line) -> function_id
+    let mut function_map: HashMap<(i64, i64, i64), u64> = HashMap::new();
+
+    // We'll keep a map for (function_id, line) -> location_id
+    // (You might also want to incorporate "is_folded" or other attributes if they vary.)
+    let mut location_map: HashMap<(u64, i64), u64> = HashMap::new();
+
+    // We'll track the next IDs to assign when we create new mapping/function/location
+    let mut next_mapping_id = 1u64;
+    let mut next_function_id = 1u64;
+    let mut next_location_id = 1u64;
+
+    //
+    // 4. For each record in the data, build up the sample
+    //
     for record in profile_data.values() {
         let mut location_ids = Vec::new();
 
-        // Process stack frames
+        // For each frame in the stack
         for frame in record.stack0.iter().take_while(|f| !f.filename.is_empty()) {
-            // Get the filename and create a mapping for it
-            let (display_name, filename, lineno) = if frame.filename.starts_with("<frozen") {
-                let clean_name = frame.filename.trim_matches(|c| c == '<' || c == '>');
-                let display = if !frame.function_name.is_empty() {
-                    format!("{}:{} {}", clean_name, frame.lineno, frame.function_name)
-                } else {
-                    format!("{}:{}", clean_name, frame.lineno)
-                };
-                (display, clean_name.to_string(), frame.lineno)
+            // Clean up the frame data
+            // – You might do your <frozen> logic here, but omitted for brevity
+            let filename = &frame.filename;
+            let lineno = frame.lineno as i64;
+            let func_name = if frame.function_name.is_empty() {
+                "<unknown>"
             } else {
-                let display = if !frame.function_name.is_empty() {
-                    format!(
-                        "{}:{} {}",
-                        frame.filename, frame.lineno, frame.function_name
-                    )
-                } else {
-                    format!("{}:{}", frame.filename, frame.lineno)
-                };
-                (display, frame.filename.to_string(), frame.lineno)
+                &frame.function_name
             };
 
-            // Add filename to string table first
-            let filename_id = if let Some(&idx) = string_index_map.get(&filename) {
-                idx
+            // Get string IDs
+            let filename_id = get_string_id(
+                filename,
+                &mut string_index_map,
+                &mut string_table,
+                &mut next_string_id,
+            );
+            let func_name_id = get_string_id(
+                func_name,
+                &mut string_index_map,
+                &mut string_table,
+                &mut next_string_id,
+            );
+
+            //
+            // 4a. Deduplicate the mapping
+            //
+            // Suppose you want one mapping per filename (typical for pprof from a single script).
+            let filename_str = filename.to_string();
+            let mapping_id = if let Some(&mid) = mapping_map.get(&filename_str) {
+                mid
             } else {
-                let idx = next_string_id;
-                next_string_id += 1;
-                string_index_map.insert(filename.clone(), idx);
-                idx
+                let mid = next_mapping_id;
+                next_mapping_id += 1;
+
+                // Insert into the profile's mapping vector
+                profile.mapping.push(Mapping {
+                    id: mid,
+                    memory_start: 0,
+                    memory_limit: 0,
+                    file_offset: 0,
+                    filename: filename_id,
+                    build_id: 0,
+                    has_functions: true,
+                    has_filenames: true,
+                    has_line_numbers: true,
+                    has_inline_frames: false,
+                });
+
+                // Remember in the map
+                mapping_map.insert(filename_str, mid);
+                mid
             };
 
-            // Add display name to string table
-            let display_name_id = if let Some(&idx) = string_index_map.get(&display_name) {
-                idx
+            //
+            // 4b. Deduplicate the function
+            //
+            let func_key = (filename_id, func_name_id, lineno);
+            let function_id = if let Some(&fid) = function_map.get(&func_key) {
+                fid
             } else {
-                let idx = next_string_id;
-                next_string_id += 1;
-                string_index_map.insert(display_name.clone(), idx);
-                idx
+                let fid = next_function_id;
+                next_function_id += 1;
+
+                profile.function.push(Function {
+                    id: fid,
+                    name: func_name_id,        // The function name
+                    system_name: func_name_id, // Could differ if you like
+                    filename: filename_id,
+                    start_line: lineno,
+                });
+
+                function_map.insert(func_key, fid);
+                fid
             };
 
-            // Create function with both filename and line number
-            let function_id = next_function_id;
-            next_function_id += 1;
+            //
+            // 4c. Deduplicate the location
+            //
+            let loc_key = (function_id, lineno);
+            let location_id = if let Some(&lid) = location_map.get(&loc_key) {
+                lid
+            } else {
+                let lid = next_location_id;
+                next_location_id += 1;
 
-            // Add mapping information first
-            profile.mapping.push(Mapping {
-                id: function_id,
-                memory_start: 0,
-                memory_limit: 0,
-                file_offset: 0,
-                filename: filename_id,
-                build_id: 0,
-                has_functions: true,
-                has_filenames: true,
-                has_line_numbers: true,
-                has_inline_frames: false,
-            });
+                profile.location.push(Location {
+                    id: lid,
+                    mapping_id: mapping_id,
+                    address: 0,
+                    line: vec![Line {
+                        function_id,
+                        line: lineno,
+                    }],
+                    is_folded: false,
+                });
 
-            // Then add function
-            profile.function.push(Function {
-                id: function_id,
-                name: display_name_id, // Use the display name that includes line number
-                system_name: display_name_id,
-                filename: filename_id,
-                start_line: lineno as i64,
-            });
-
-            // Create location
-            let location_id = next_location_id;
-            next_location_id += 1;
-
-            profile.location.push(Location {
-                id: location_id,
-                mapping_id: function_id,
-                address: 0,
-                line: vec![Line {
-                    function_id,
-                    line: lineno as i64,
-                }],
-                is_folded: false,
-            });
+                location_map.insert(loc_key, lid);
+                lid
+            };
 
             location_ids.push(location_id);
         }
@@ -285,7 +344,7 @@ pub fn get_pprof_data() -> PyResult<Vec<u8>> {
         let inuse_objects = record.alloc_objects - record.free_objects;
         let inuse_bytes = record.alloc_bytes - record.free_bytes;
 
-        // Add sample
+        // Finally, push the Sample
         profile.sample.push(Sample {
             location_id: location_ids,
             value: vec![
@@ -298,22 +357,34 @@ pub fn get_pprof_data() -> PyResult<Vec<u8>> {
         });
     }
 
-    // Build string table at the end
-    let mut string_table = vec!["".to_string()];
-    string_table.resize(string_index_map.len(), String::new());
-    for (s, &idx) in &string_index_map {
-        string_table[idx as usize] = s.clone();
-    }
+    //
+    // 5. Now that we've built the profile, attach the final string table
+    //
     profile.string_table = string_table;
 
-    // Encode the profile to bytes
-    let mut buf = Vec::new();
-    profile.encode(&mut buf).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
-            "Failed to encode profile: {}",
-            e
-        ))
-    })?;
+    //
+    // 6. Encode the profile
+    //
+    let buf = profile.encode_to_vec();
+    if compress {
+        let mut compressed = Vec::new();
+        let mut encoder =
+            flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
 
-    Ok(buf)
+        encoder.write_all(&buf).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to encode profile: {}",
+                e
+            ))
+        })?;
+        encoder.finish().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to finish encoding profile: {}",
+                e
+            ))
+        })?;
+        Ok(compressed)
+    } else {
+        Ok(buf)
+    }
 }

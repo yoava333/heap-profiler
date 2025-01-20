@@ -21,6 +21,7 @@ bytes = "1.5"
 lazy_static = "1.4"
 hashbrown = "0.15.2"
 libc = "0.2"
+flate2 = "1.0.25"
 
 [build-dependencies]
 pyo3-build-config = { version = "0.23.4", features = ["resolve-config"] }

@@ -34,8 +34,8 @@ def allocate_and_free():
             f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
         )
         print("Stack trace:")
-        for filename, lineno in profile_entry.stack_frames:
-            print(f"  {filename}:{lineno}")
+        for filename, function, lineno in profile_entry.stack_frames:
+            print(f"  {filename}:{lineno}:{function}")
 
     # Write heap profile to file
     profile_data = get_pprof_data()
@@ -61,11 +61,11 @@ def allocate_and_free():
             f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
         )
         print("Stack trace:")
-        for filename, lineno in profile_entry.stack_frames:
-            print(f"  {filename}:{lineno}")
+        for filename, function, lineno in profile_entry.stack_frames:
+            print(f"  {filename}:{lineno}:{function}")
 
     # Write updated heap profile
-    profile_data = get_pprof_data()
+    profile_data = get_pprof_data(compress=True)
     with open("heap_after_free.prof", "wb") as f:
         f.write(profile_data)
 
@@ -73,7 +73,7 @@ def allocate_and_free():
 
     gc.collect()
 
-    profile_data = get_pprof_data()
+    profile_data = get_pprof_data(compress=True)
     with open("heap_after_np_alloc.prof", "wb") as f:
         f.write(profile_data)
 
