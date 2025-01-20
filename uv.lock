@@ -22,12 +22,10 @@ wheels = [
 [[package]]
 name = "heap-profiler"
 source = { editable = "." }
-dependencies = [
-    { name = "numpy" },
-]
 
 [package.dev-dependencies]
 dev = [
+    { name = "numpy" },
     { name = "protobuf" },
     { name = "psutil" },
     { name = "pyperformance" },
@@ -36,10 +34,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "numpy", specifier = ">1.26" }]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "numpy", specifier = ">1.26" },
     { name = "protobuf", specifier = ">=5.29.3" },
     { name = "psutil", specifier = ">=6.1.1" },
     { name = "pyperformance", specifier = ">=1.11.0" },
