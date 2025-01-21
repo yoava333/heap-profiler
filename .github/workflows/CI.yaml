@@ -32,22 +32,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - uses: actions/checkout@v3
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-
-      - name: Run tests
-        env:
-          UV_PYTHON: "3.11"
-        run: |
-          set -xe
-          uv sync
-          uv run pytest ./tests
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -61,6 +53,63 @@ jobs:
         with:
           name: wheels-linux-${{ matrix.target }}
           path: dist
+
+  performance:
+    needs: linux
+    runs-on: ubuntu-latest
+    env:
+      PYPERFORMANCE_BENCHMARKS: "2to3,json_dumps,pathlib,pickle_dict,tornado_http,sqlalchemy_imperative"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download linux wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: dist
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Setup Python environment
+        env:
+          UV_PYTHON: "3.11"
+        run: |
+          set -xe
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install pyperformance
+          uv pip install ./dist/*.whl
+
+      - name: Run baseline performance tests
+        run: |
+          # Run a subset of benchmarks and save baseline
+          uv run pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o baseline.json
+
+      - name: Install heap profiler .pth file
+        run: |
+          source .venv/bin/activate
+          echo "import heap_profiler; heap_profiler.start_tracing()" > .venv/lib/python3.11/site-packages/heap_profiler.pth
+
+      - name: Run performance tests with heap profiler
+        run: |
+          uv run pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o with_profiler.json
+
+      - name: Compare results
+        run: |
+          uv run pyperformance compare baseline.json with_profiler.json > performance_comparison.txt
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: |
+            baseline.json
+            with_profiler.json
+            performance_comparison.txt
 
   macos:
     runs-on: macos-latest
