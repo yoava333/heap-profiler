@@ -86,21 +86,31 @@ jobs:
 
       - name: Run baseline performance tests
         run: |
+          set -xe
           # Run a subset of benchmarks and save baseline
-          uv run pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o baseline.json
+          source .venv/bin/activate
+          pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o baseline.json
 
       - name: Install heap profiler .pth file
         run: |
+          set -xe
           source .venv/bin/activate
           echo "import heap_profiler; heap_profiler.start_tracing()" > .venv/lib/python3.11/site-packages/heap_profiler.pth
+          # Validate that the .pth file loads
+          python -c 'import sys; assert "heap_profiler" in sys.modules'
 
       - name: Run performance tests with heap profiler
         run: |
-          uv run pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o with_profiler.json
+          set -xe
+          source .venv/bin/activate
+          pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o with_profiler.json
 
       - name: Compare results
         run: |
-          uv run pyperformance compare baseline.json with_profiler.json > performance_comparison.txt
+          set -xe
+          source .venv/bin/activate
+          pyperformance compare baseline.json with_profiler.json > performance_comparison.txt
+          cat performance_comparison.txt
 
       - name: Upload performance results
         uses: actions/upload-artifact@v4
