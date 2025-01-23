@@ -81,8 +81,8 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
 ///
 /// This function returns the heap profile data as a pprof-compatible binary format.
 #[pyfunction]
-#[pyo3(signature = (compress=false))]
-pub fn get_pprof_data(compress: bool) -> PyResult<Vec<u8>> {
+#[pyo3(signature = (tags=None, compress=false))]
+pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> PyResult<Vec<u8>> {
     let profile_data = PROFILE_DATA.lock().map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
     })?;
@@ -211,7 +211,22 @@ pub fn get_pprof_data(compress: bool) -> PyResult<Vec<u8>> {
     };
 
     //
-    // 3. Dedup structures:
+    // 3. Add tags to the profile
+    //
+    if let Some(tags) = tags {
+        for (k, v) in tags {
+            let line = format!("{}: {}", k, v);
+            profile.comment.push(get_string_id(
+                &line,
+                &mut string_index_map,
+                &mut string_table,
+                &mut next_string_id,
+            ));
+        }
+    }
+
+    //
+    // 4. Dedup structures:
     //
     // We'll keep a map for (filename) -> mapping_id
     let mut mapping_map: HashMap<String, u64> = HashMap::new();
@@ -229,7 +244,7 @@ pub fn get_pprof_data(compress: bool) -> PyResult<Vec<u8>> {
     let mut next_location_id = 1u64;
 
     //
-    // 4. For each record in the data, build up the sample
+    // 5. For each record in the data, build up the sample
     //
     for record in profile_data.values() {
         let mut location_ids = Vec::new();
@@ -358,12 +373,12 @@ pub fn get_pprof_data(compress: bool) -> PyResult<Vec<u8>> {
     }
 
     //
-    // 5. Now that we've built the profile, attach the final string table
+    // 6. Now that we've built the profile, attach the final string table
     //
     profile.string_table = string_table;
 
     //
-    // 6. Encode the profile
+    // 7. Encode the profile
     //
     let buf = profile.encode_to_vec();
     if compress {

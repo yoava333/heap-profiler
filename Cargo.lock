@@ -327,6 +327,7 @@ version = "0.23.3"
 source = "git+https://github.com/yoava333/pyo3.git?branch=expose_getframe_and_getcode#a20f6a80ba585e7b62d1a724f5e5bda8794a8d79"
 dependencies = [
  "cfg-if",
+ "hashbrown",
  "indoc",
  "libc",
  "memoffset",

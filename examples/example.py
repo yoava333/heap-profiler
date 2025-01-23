@@ -65,7 +65,7 @@ def allocate_and_free() -> None:
             print(f"  {filename}:{lineno}:{function}")
 
     # Write updated heap profile
-    profile_data = get_pprof_data(compress=True)
+    profile_data = get_pprof_data(tags={"foo": "bar"}, compress=True)
     with open("heap_after_free.prof", "wb") as f:
         f.write(profile_data)
 
@@ -73,7 +73,7 @@ def allocate_and_free() -> None:
 
     gc.collect()
 
-    profile_data = get_pprof_data(compress=True)
+    profile_data = get_pprof_data(tags={"foo2": "bar2"}, compress=True)
     with open("heap_after_np_alloc.prof", "wb") as f:
         f.write(profile_data)
 

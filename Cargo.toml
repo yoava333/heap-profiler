@@ -9,7 +9,7 @@ name = "heap_profiler"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { git = "https://github.com/yoava333/pyo3.git", branch = "expose_getframe_and_getcode" }
+pyo3 = { git = "https://github.com/yoava333/pyo3.git", branch = "expose_getframe_and_getcode", features = ["hashbrown"] }
 pyo3-ffi = { git = "https://github.com/yoava333/pyo3.git", branch = "expose_getframe_and_getcode" }
 rand = "0.8.5"
 tracing = "0.1.40"
