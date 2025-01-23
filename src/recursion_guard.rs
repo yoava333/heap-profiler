@@ -30,16 +30,25 @@ impl Drop for MallocRecursionGuard {
 }
 
 // GC Disable
-pub struct PythonGCGuard {}
+pub struct PythonGCGuard {
+    was_gc_enabled: bool,
+}
 
 impl PythonGCGuard {
     pub fn new() -> Self {
         #[cfg(Py_3_10)]
         unsafe {
-            use pyo3_ffi::PyGC_Disable;
-            PyGC_Disable();
+            use pyo3_ffi::{PyGC_Disable, PyGC_IsEnabled};
+            let was_gc_enabled = PyGC_IsEnabled() == 1;
+            if was_gc_enabled {
+                PyGC_Disable();
+            }
+            Self { was_gc_enabled }
         }
-        Self {}
+        #[cfg(not(Py_3_10))]
+        Self {
+            was_gc_enabled: false,
+        }
     }
 }
 
@@ -48,7 +57,9 @@ impl Drop for PythonGCGuard {
         #[cfg(Py_3_10)]
         unsafe {
             use pyo3_ffi::PyGC_Enable;
-            PyGC_Enable();
+            if self.was_gc_enabled {
+                PyGC_Enable();
+            }
         }
     }
 }

@@ -44,6 +44,13 @@ pub fn calculate_stack_hash(stack: &[StackFrame]) -> u64 {
     hasher.finish()
 }
 
+struct RefCountGuard(*mut ffi::PyObject);
+impl Drop for RefCountGuard {
+    fn drop(&mut self) {
+        unsafe { ffi::Py_XDECREF(self.0) };
+    }
+}
+
 pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
     let mut depth: usize = 0;
 
@@ -63,32 +70,17 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
             return 0;
         }
 
-        // Ensure we clean up the initial frame reference on all exit paths
-        struct FrameGuard(*mut ffi::PyObject);
-        impl Drop for FrameGuard {
-            fn drop(&mut self) {
-                if !self.0.is_null() {
-                    unsafe { ffi::Py_XDECREF(self.0) };
-                }
-            }
-        }
-        let _frame_guard = FrameGuard(frame as *mut ffi::PyObject);
-
         // SAFETY: The following unsafe block handles Python frame traversal
         unsafe {
             while !frame.is_null() && depth < 128 {
+                let _frame_guard = RefCountGuard(frame as *mut ffi::PyObject);
+
                 // Get code object and ensure cleanup
                 let code = ffi::PyFrame_GetCode(frame);
                 if code.is_null() {
                     break;
                 }
-                struct CodeGuard(*mut ffi::PyObject);
-                impl Drop for CodeGuard {
-                    fn drop(&mut self) {
-                        unsafe { ffi::Py_DECREF(self.0) };
-                    }
-                }
-                let _code_guard = CodeGuard(code as *mut ffi::PyObject);
+                let _code_guard = RefCountGuard(code as *mut ffi::PyObject);
 
                 // Get filename from code object
                 let co_filename = (*code).co_filename;
@@ -102,13 +94,7 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                     warn!("Failed to convert filename to ASCII string");
                     break;
                 }
-                struct AsciiGuard(*mut ffi::PyObject);
-                impl Drop for AsciiGuard {
-                    fn drop(&mut self) {
-                        unsafe { ffi::Py_XDECREF(self.0) };
-                    }
-                }
-                let _ascii_guard = AsciiGuard(ascii_str as *mut ffi::PyObject);
+                let _ascii_guard = RefCountGuard(ascii_str as *mut ffi::PyObject);
 
                 // Convert filename to string
                 // SAFETY: PyBytes_AsString returns a pointer to the internal buffer
