@@ -10,6 +10,25 @@ A high-performance Python memory profiler that helps you understand memory usage
 - **Rich Profile Data**: Provides detailed memory usage statistics per stack trace
 - **pprof Compatible**: Outputs data in pprof format for visualization
 
+## TL;DR
+
+```bash
+pip install heap-profiler
+```
+
+```python
+import heap_profiler
+heap_profiler.start_tracing()
+
+# your code here
+# ...
+
+with open("heap.pb.gz", "wb") as f:
+    f.write(heap_profiler.get_pprof_data(compress=True))
+```
+
+See [examples/pprof_server.py](examples/pprof_server.py) for a simple pprof server.
+
 ## Why another memory profiler?
 
 Our inspriation was the pprof module from golang, which provides low overhead production memory tracing.
@@ -88,26 +107,28 @@ It uses statistical sampling for small allocations (< 256KB) and tracks all larg
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/heap-profiler.git
+# install maturin
+uv tool install maturin
+
+# install rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# clone the repository
+git clone https://github.com/yoava333/heap-profiler.git
 cd heap-profiler
 ```
 
-2. Build the project:
-
-```bash
-cargo build
-```
-
-3. For development installation:
+2. For development installation:
 
 ```bash
 maturin develop --uv
 ```
 
-### Running Tests
+3. For testing:
 
 ```bash
 cargo test
+uv run pytest tests/
 ```
 
 ### Project Structure
