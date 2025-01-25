@@ -30,6 +30,7 @@ dev-dependencies = [
     "types-psutil>=6.1.0.20241221",
     "types-protobuf>=5.29.1.20241207",
     "flask>=3.1.0",
+    "pytest-repeat>=0.9.3",
 ]
 
 [tool.mypy]

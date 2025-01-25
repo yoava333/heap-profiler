@@ -70,6 +70,7 @@ dev = [
     { name = "pyperformance" },
     { name = "pytest" },
     { name = "pytest-forked" },
+    { name = "pytest-repeat" },
     { name = "types-protobuf" },
     { name = "types-psutil" },
 ]
@@ -86,6 +87,7 @@ dev = [
     { name = "pyperformance", specifier = ">=1.11.0" },
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "pytest-forked", specifier = ">=1.6.0" },
+    { name = "pytest-repeat", specifier = ">=0.9.3" },
     { name = "types-protobuf", specifier = ">=5.29.1.20241207" },
     { name = "types-psutil", specifier = ">=6.1.0.20241221" },
 ]
@@ -397,6 +399,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8c/c9/93ad2ba2413057ee694884b88cf7467a46c50c438977720aeac26e73fdb7/pytest-forked-1.6.0.tar.gz", hash = "sha256:4dafd46a9a600f65d822b8f605133ecf5b3e1941ebb3588e943b4e3eb71a5a3f", size = 9977 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/af/9c0bda43e486a3c9bf1e0f876d0f241bc3f229d7d65d09331a0868db9629/pytest_forked-1.6.0-py3-none-any.whl", hash = "sha256:810958f66a91afb1a1e2ae83089d8dc1cd2437ac96b12963042fbb9fb4d16af0", size = 4897 },
+]
+
+[[package]]
+name = "pytest-repeat"
+version = "0.9.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/86/5e/99365eb229efff0b1bd475886150fc6db9937ab7e1bd21f6f65c1279e0eb/pytest_repeat-0.9.3.tar.gz", hash = "sha256:ffd3836dfcd67bb270bec648b330e20be37d2966448c4148c4092d1e8aba8185", size = 6272 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/a8/0a0aec0c2541b8baf4a0b95af2ba99abce217ee43534adf9cb7c908cf184/pytest_repeat-0.9.3-py3-none-any.whl", hash = "sha256:26ab2df18226af9d5ce441c858f273121e92ff55f5bb311d25755b8d7abdd8ed", size = 4196 },
 ]
 
 [[package]]

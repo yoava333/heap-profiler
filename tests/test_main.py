@@ -1,4 +1,5 @@
 import gc
+import random
 from string import ascii_letters
 
 import numpy as np
@@ -38,8 +39,11 @@ def test_small_allocations():
     # Create many medium allocations
     objects = []
     for _ in range(1024):
+        new_chars_list = list(ascii_letters)
+        random.shuffle(new_chars_list)
+        new_chars = "".join(new_chars_list)
         objects.append(
-            (ascii_letters * (1024 // len(ascii_letters))).encode()
+            (new_chars * (1024 // len(new_chars))).encode()
         )  # 1KB allocations
 
     profile_data = get_profile_data()
