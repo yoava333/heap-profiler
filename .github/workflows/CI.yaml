@@ -97,21 +97,21 @@ jobs:
           set -xe
           # Run a subset of benchmarks and save baseline
           source .venv/bin/activate
-          pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o baseline.json
+          pyperformance run --track-memory -b $PYPERFORMANCE_BENCHMARKS -o baseline.json
 
       - name: Install heap profiler .pth file
         run: |
           set -xe
           source .venv/bin/activate
           echo "import heap_profiler; heap_profiler.start_tracing()" > .venv/lib/python3.11/site-packages/heap_profiler.pth
-          # Validate that the .pth file loads
-          python -c 'import sys; assert "heap_profiler" in sys.modules'
+          # Validate that the .pth file loads and tracing has started
+          python -c 'import sys; from heap_profiler import get_sample_rate; assert "heap_profiler" in sys.modules and get_sample_rate() > 0'
 
       - name: Run performance tests with heap profiler
         run: |
           set -xe
           source .venv/bin/activate
-          pyperformance run -b $PYPERFORMANCE_BENCHMARKS -o with_profiler.json
+          pyperformance run --track-memory -b $PYPERFORMANCE_BENCHMARKS -o with_profiler.json
 
       - name: Compare results
         run: |

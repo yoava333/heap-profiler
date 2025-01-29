@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 from proto.profile_pb2 import Profile
+from test_utils import memory_stress
 
 pytestmark = pytest.mark.forked
 
@@ -232,3 +233,17 @@ def test_no_memory_leaks():
     assert (
         abs(final_allocs - final_frees) < 1024 * 1024
     ), "Memory should be properly freed"
+
+
+def test_profiler_memory_consumption():
+    """Test that the profiler itself doesn't consume too much memory or have leaks."""
+    start_tracing()
+    gc.collect()  # Ensure a clean slate for memory tracking
+
+    initial_memory, final_memory = memory_stress()
+
+    print(f"Initial memory: {initial_memory / 1024 / 1024} MiB")
+    print(f"Final memory: {final_memory / 1024 / 1024} MiB")
+
+    # Allow a small increase in memory usage, but not more than 5 MiB
+    assert (final_memory - initial_memory) / (1024 * 1024) < 5, "Memory usage increased significantly"
