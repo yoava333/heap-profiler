@@ -8,6 +8,9 @@ use tracing::{debug, warn};
 use crate::interner::intern;
 use crate::recursion_guard::PythonGCGuard;
 
+const NATIVE_THREAD_MARKER: &str = "<native thread>";
+const NATIVE_FUNCTION_MARKER: &str = "<native function>";
+
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     pub filename: Cow<'static, str>,
@@ -54,15 +57,31 @@ impl Drop for RefCountGuard {
 pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
     let mut depth: usize = 0;
 
+    // SAFETY: it's safe to call PyGILState_GetThisThreadState without holding the GIL
+    let thread_state = unsafe { ffi::PyGILState_GetThisThreadState() };
+
+    // We have to check this outside the GIL!
+    // The reason is that we have encountered situations where python native extensions spawn
+    // native threads (rdkafka is one such example).
+    //
+    // If we try to acquire the GIL in native thread, we will be blocked forever.
+    // And more importantly, if a python thread is waiting for the native thread to finish,
+    // it will be blocked forever.
+    // So we have to check this outside the GIL.
+    if thread_state.is_null() {
+        stack[depth] = StackFrame {
+            // TODO: add native thread unwinding
+            filename: Cow::Borrowed(NATIVE_THREAD_MARKER),
+            lineno: 0,
+            bytei: 0,
+            function_name: Cow::Borrowed(NATIVE_FUNCTION_MARKER),
+        };
+        return 1;
+    }
+
     Python::with_gil(|_py| {
         // disable gc
         let _gc_guard = PythonGCGuard::new();
-
-        // SAFETY: PyGILState_GetThisThreadState is safe to call while holding the GIL
-        let thread_state = unsafe { ffi::PyGILState_GetThisThreadState() };
-        if thread_state.is_null() {
-            return 0;
-        }
 
         // SAFETY: PyThreadState_GetFrame is safe to call on a valid thread state
         let mut frame = unsafe { ffi::PyThreadState_GetFrame(thread_state) };

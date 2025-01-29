@@ -63,6 +63,7 @@ source = { editable = "." }
 [package.dev-dependencies]
 dev = [
     { name = "flask" },
+    { name = "malloc-stresser" },
     { name = "mypy" },
     { name = "numpy" },
     { name = "protobuf" },
@@ -80,6 +81,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "flask", specifier = ">=3.1.0" },
+    { name = "malloc-stresser", git = "https://github.com/yoava333/malloc-stresser.git" },
     { name = "mypy", specifier = ">=1.8.0" },
     { name = "numpy", specifier = ">1.26" },
     { name = "protobuf", specifier = ">=5.29.3" },
@@ -121,6 +123,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/af/92/b3130cbbf5591acf9
 wheels = [
     { url = "https://files.pythonhosted.org/packages/bd/0f/2ba5fbcd631e3e88689309dbe978c5769e883e4b84ebfe7da30b43275c5a/jinja2-3.1.5-py3-none-any.whl", hash = "sha256:aba0f4dc9ed8013c424088f68a5c226f7d6097ed89b246d7749c2ec4175c6adb", size = 134596 },
 ]
+
+[[package]]
+name = "malloc-stresser"
+version = "0.1.0"
+source = { git = "https://github.com/yoava333/malloc-stresser.git#0cac40a9b6c18f78f1aca2e74792fea93f919771" }
 
 [[package]]
 name = "markupsafe"

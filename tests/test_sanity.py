@@ -2,6 +2,7 @@ import os
 
 import psutil
 import pytest
+from threading import Thread
 from heap_profiler import get_profile_data, get_sample_rate, start_tracing
 
 pytestmark = pytest.mark.forked
@@ -120,3 +121,12 @@ def test_c_extension_allocations():
     profile_data = get_profile_data()
     total_allocs = sum(entry.alloc_bytes for entry in profile_data)
     assert total_allocs >= MiB, "Should capture allocations from C extensions"
+
+
+def test_native_stress():
+    from malloc_stresser import native_stress
+
+    # This test checks for deadlocks in native threads and their GIL interaction.
+    # stack.rs where_in_python() for full details.
+
+    native_stress(threads=100, iterations=1000)

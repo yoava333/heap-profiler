@@ -7,8 +7,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = [
-]
+dependencies = []
 
 [build-system]
 requires = ["maturin>=1.7,<2.0"]
@@ -31,7 +30,11 @@ dev-dependencies = [
     "types-protobuf>=5.29.1.20241207",
     "flask>=3.1.0",
     "pytest-repeat>=0.9.3",
+    "malloc-stresser",
 ]
+
+[tool.uv.sources]
+malloc-stresser = { git = "https://github.com/yoava333/malloc-stresser.git" }
 
 [tool.mypy]
 python_version = "3.10"
