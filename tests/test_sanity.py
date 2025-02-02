@@ -2,7 +2,6 @@ import os
 
 import psutil
 import pytest
-from threading import Thread
 from heap_profiler import get_profile_data, get_sample_rate, start_tracing
 
 pytestmark = pytest.mark.forked
@@ -116,11 +115,17 @@ def test_c_extension_allocations():
     start_tracing()
 
     # Allocate and free memory using C standard library
-    arr = np.ones(MiB)  # 1MB allocation
+    arr = np.ones(MiB, dtype=np.int8)  # 1MB allocation
 
     profile_data = get_profile_data()
-    total_allocs = sum(entry.alloc_bytes for entry in profile_data)
-    assert total_allocs >= MiB, "Should capture allocations from C extensions"
+
+    total_allocs = 0
+    for entry in profile_data:
+        for frame in entry.stack_frames:
+            if "ones" in frame[1]:
+                total_allocs += entry.alloc_bytes
+
+    assert total_allocs == MiB, "Should capture allocations from C extensions"
 
 
 def test_native_stress():
