@@ -1,4 +1,16 @@
+import ctypes
+import gc
+
 import psutil
+
+
+def force_malloc_trim():
+    """Attempt to force libc to return unused memory to the OS."""
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except OSError:
+        pass
 
 
 def a():
@@ -48,5 +60,7 @@ def memory_stress():
         for _ in range(1):
             a()
 
+    gc.collect()  # Ensure a clean slate for memory tracking
+    force_malloc_trim()
     final_memory = process.memory_info().rss
     return initial_memory, final_memory
