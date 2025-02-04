@@ -1,12 +1,33 @@
-from google.protobuf.internal import containers as _containers
+from collections.abc import Iterable as _Iterable
+from collections.abc import Mapping as _Mapping
+from typing import (
+    ClassVar as _ClassVar,
+)
+
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from google.protobuf.internal import containers as _containers
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class Profile(_message.Message):
-    __slots__ = ("sample_type", "sample", "mapping", "location", "function", "string_table", "drop_frames", "keep_frames", "time_nanos", "duration_nanos", "period_type", "period", "comment", "default_sample_type", "doc_url")
+    __slots__ = (
+        "sample_type",
+        "sample",
+        "mapping",
+        "location",
+        "function",
+        "string_table",
+        "drop_frames",
+        "keep_frames",
+        "time_nanos",
+        "duration_nanos",
+        "period_type",
+        "period",
+        "comment",
+        "default_sample_type",
+        "doc_url",
+    )
     SAMPLE_TYPE_FIELD_NUMBER: _ClassVar[int]
     SAMPLE_FIELD_NUMBER: _ClassVar[int]
     MAPPING_FIELD_NUMBER: _ClassVar[int]
@@ -37,7 +58,24 @@ class Profile(_message.Message):
     comment: _containers.RepeatedScalarFieldContainer[int]
     default_sample_type: int
     doc_url: int
-    def __init__(self, sample_type: _Optional[_Iterable[_Union[ValueType, _Mapping]]] = ..., sample: _Optional[_Iterable[_Union[Sample, _Mapping]]] = ..., mapping: _Optional[_Iterable[_Union[Mapping, _Mapping]]] = ..., location: _Optional[_Iterable[_Union[Location, _Mapping]]] = ..., function: _Optional[_Iterable[_Union[Function, _Mapping]]] = ..., string_table: _Optional[_Iterable[str]] = ..., drop_frames: _Optional[int] = ..., keep_frames: _Optional[int] = ..., time_nanos: _Optional[int] = ..., duration_nanos: _Optional[int] = ..., period_type: _Optional[_Union[ValueType, _Mapping]] = ..., period: _Optional[int] = ..., comment: _Optional[_Iterable[int]] = ..., default_sample_type: _Optional[int] = ..., doc_url: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        sample_type: _Iterable[ValueType | _Mapping] | None = ...,
+        sample: _Iterable[Sample | _Mapping] | None = ...,
+        mapping: _Iterable[Mapping | _Mapping] | None = ...,
+        location: _Iterable[Location | _Mapping] | None = ...,
+        function: _Iterable[Function | _Mapping] | None = ...,
+        string_table: _Iterable[str] | None = ...,
+        drop_frames: int | None = ...,
+        keep_frames: int | None = ...,
+        time_nanos: int | None = ...,
+        duration_nanos: int | None = ...,
+        period_type: ValueType | _Mapping | None = ...,
+        period: int | None = ...,
+        comment: _Iterable[int] | None = ...,
+        default_sample_type: int | None = ...,
+        doc_url: int | None = ...,
+    ) -> None: ...
 
 class ValueType(_message.Message):
     __slots__ = ("type", "unit")
@@ -45,7 +83,7 @@ class ValueType(_message.Message):
     UNIT_FIELD_NUMBER: _ClassVar[int]
     type: int
     unit: int
-    def __init__(self, type: _Optional[int] = ..., unit: _Optional[int] = ...) -> None: ...
+    def __init__(self, type: int | None = ..., unit: int | None = ...) -> None: ...
 
 class Sample(_message.Message):
     __slots__ = ("location_id", "value", "label")
@@ -55,7 +93,12 @@ class Sample(_message.Message):
     location_id: _containers.RepeatedScalarFieldContainer[int]
     value: _containers.RepeatedScalarFieldContainer[int]
     label: _containers.RepeatedCompositeFieldContainer[Label]
-    def __init__(self, location_id: _Optional[_Iterable[int]] = ..., value: _Optional[_Iterable[int]] = ..., label: _Optional[_Iterable[_Union[Label, _Mapping]]] = ...) -> None: ...
+    def __init__(
+        self,
+        location_id: _Iterable[int] | None = ...,
+        value: _Iterable[int] | None = ...,
+        label: _Iterable[Label | _Mapping] | None = ...,
+    ) -> None: ...
 
 class Label(_message.Message):
     __slots__ = ("key", "str", "num", "num_unit")
@@ -67,10 +110,27 @@ class Label(_message.Message):
     str: int
     num: int
     num_unit: int
-    def __init__(self, key: _Optional[int] = ..., str: _Optional[int] = ..., num: _Optional[int] = ..., num_unit: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        key: int | None = ...,
+        str: int | None = ...,
+        num: int | None = ...,
+        num_unit: int | None = ...,
+    ) -> None: ...
 
 class Mapping(_message.Message):
-    __slots__ = ("id", "memory_start", "memory_limit", "file_offset", "filename", "build_id", "has_functions", "has_filenames", "has_line_numbers", "has_inline_frames")
+    __slots__ = (
+        "id",
+        "memory_start",
+        "memory_limit",
+        "file_offset",
+        "filename",
+        "build_id",
+        "has_functions",
+        "has_filenames",
+        "has_line_numbers",
+        "has_inline_frames",
+    )
     ID_FIELD_NUMBER: _ClassVar[int]
     MEMORY_START_FIELD_NUMBER: _ClassVar[int]
     MEMORY_LIMIT_FIELD_NUMBER: _ClassVar[int]
@@ -91,7 +151,19 @@ class Mapping(_message.Message):
     has_filenames: bool
     has_line_numbers: bool
     has_inline_frames: bool
-    def __init__(self, id: _Optional[int] = ..., memory_start: _Optional[int] = ..., memory_limit: _Optional[int] = ..., file_offset: _Optional[int] = ..., filename: _Optional[int] = ..., build_id: _Optional[int] = ..., has_functions: bool = ..., has_filenames: bool = ..., has_line_numbers: bool = ..., has_inline_frames: bool = ...) -> None: ...
+    def __init__(
+        self,
+        id: int | None = ...,
+        memory_start: int | None = ...,
+        memory_limit: int | None = ...,
+        file_offset: int | None = ...,
+        filename: int | None = ...,
+        build_id: int | None = ...,
+        has_functions: bool = ...,
+        has_filenames: bool = ...,
+        has_line_numbers: bool = ...,
+        has_inline_frames: bool = ...,
+    ) -> None: ...
 
 class Location(_message.Message):
     __slots__ = ("id", "mapping_id", "address", "line", "is_folded")
@@ -105,7 +177,14 @@ class Location(_message.Message):
     address: int
     line: _containers.RepeatedCompositeFieldContainer[Line]
     is_folded: bool
-    def __init__(self, id: _Optional[int] = ..., mapping_id: _Optional[int] = ..., address: _Optional[int] = ..., line: _Optional[_Iterable[_Union[Line, _Mapping]]] = ..., is_folded: bool = ...) -> None: ...
+    def __init__(
+        self,
+        id: int | None = ...,
+        mapping_id: int | None = ...,
+        address: int | None = ...,
+        line: _Iterable[Line | _Mapping] | None = ...,
+        is_folded: bool = ...,
+    ) -> None: ...
 
 class Line(_message.Message):
     __slots__ = ("function_id", "line", "column")
@@ -115,7 +194,12 @@ class Line(_message.Message):
     function_id: int
     line: int
     column: int
-    def __init__(self, function_id: _Optional[int] = ..., line: _Optional[int] = ..., column: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        function_id: int | None = ...,
+        line: int | None = ...,
+        column: int | None = ...,
+    ) -> None: ...
 
 class Function(_message.Message):
     __slots__ = ("id", "name", "system_name", "filename", "start_line")
@@ -129,4 +213,11 @@ class Function(_message.Message):
     system_name: int
     filename: int
     start_line: int
-    def __init__(self, id: _Optional[int] = ..., name: _Optional[int] = ..., system_name: _Optional[int] = ..., filename: _Optional[int] = ..., start_line: _Optional[int] = ...) -> None: ...
+    def __init__(
+        self,
+        id: int | None = ...,
+        name: int | None = ...,
+        system_name: int | None = ...,
+        filename: int | None = ...,
+        start_line: int | None = ...,
+    ) -> None: ...

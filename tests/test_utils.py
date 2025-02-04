@@ -4,23 +4,30 @@ import psutil
 def a():
     b()
 
+
 def b():
     c()
+
 
 def c():
     d()
 
+
 def d():
     e()
+
 
 def e():
     f()
 
+
 def f():
     g()
 
+
 def g():
     h()
+
 
 def h():
     objs = list(range(1000))

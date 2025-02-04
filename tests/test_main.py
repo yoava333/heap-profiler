@@ -43,9 +43,7 @@ def test_small_allocations():
         new_chars_list = list(ascii_letters)
         random.shuffle(new_chars_list)
         new_chars = "".join(new_chars_list)
-        objects.append(
-            (new_chars * (1024 // len(new_chars))).encode()
-        )  # 1KB allocations
+        objects.append((new_chars * (1024 // len(new_chars))).encode())  # 1KB allocations
 
     profile_data = get_profile_data()
     new_allocs = sum(entry.alloc_bytes for entry in profile_data)
@@ -80,8 +78,7 @@ def test_allocation_line_tracking():
     this_file_frames = [
         (filename, function_name, lineno)
         for filename, function_name, lineno in entry.stack_frames
-        if "test_main.py" in filename
-        and "test_allocation_line_tracking" in function_name
+        if "test_main.py" in filename and "test_allocation_line_tracking" in function_name
     ]
 
     assert len(this_file_frames) > 0, "Should find frame from this test file"
@@ -140,10 +137,7 @@ def test_allocate_and_free():
     assert len(profile.string_table) > 0, "Profile should have string table"
 
     # Validate heap profile specific fields
-    sample_types = [
-        (profile.string_table[t.type], profile.string_table[t.unit])
-        for t in profile.sample_type
-    ]
+    sample_types = [(profile.string_table[t.type], profile.string_table[t.unit]) for t in profile.sample_type]
     assert (
         "alloc_objects",
         "count",
@@ -153,9 +147,7 @@ def test_allocate_and_free():
     # Validate samples have stack traces
     for sample in profile.sample:
         assert len(sample.location_id) > 0, "Sample should have location"
-        assert len(sample.value) == len(
-            profile.sample_type
-        ), "Sample should have all values"
+        assert len(sample.value) == len(profile.sample_type), "Sample should have all values"
 
     # Validate locations have function information
     for location in profile.location:
@@ -189,9 +181,7 @@ def test_profile_data_structure():
     profile_data = get_profile_data()
 
     # Find our allocation in the profile
-    relevant_entries = [
-        entry for entry in profile_data if entry.alloc_bytes >= 1024 * 1024
-    ]
+    relevant_entries = [entry for entry in profile_data if entry.alloc_bytes >= 1024 * 1024]
 
     assert len(relevant_entries) > 0, "Should find our allocation"
     entry = relevant_entries[0]
@@ -230,9 +220,7 @@ def test_no_memory_leaks():
     print(f"Final frees: {final_frees}")
 
     # Should have roughly equal allocations and frees
-    assert (
-        abs(final_allocs - final_frees) < 1024 * 1024
-    ), "Memory should be properly freed"
+    assert abs(final_allocs - final_frees) < 1024 * 1024, "Memory should be properly freed"
 
 
 def test_profiler_memory_consumption():

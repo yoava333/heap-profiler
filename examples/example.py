@@ -1,6 +1,10 @@
 from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 
-start_tracing()
+try:
+    start_tracing()
+except Exception as e:
+    print(f"Error starting tracing: {e}")
+
 import ssl
 import sys
 
@@ -27,12 +31,8 @@ def allocate_and_free() -> None:
     print("\nProfile data after allocations:")
     for profile_entry in get_profile_data():
         print("\nAllocation point:")
-        print(
-            f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)"
-        )
-        print(
-            f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
-        )
+        print(f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)")
+        print(f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)")
         print("Stack trace:")
         for filename, function, lineno in profile_entry.stack_frames:
             print(f"  {filename}:{lineno}:{function}")
@@ -54,12 +54,8 @@ def allocate_and_free() -> None:
     print("\nProfile data after frees:")
     for profile_entry in get_profile_data():
         print("\nAllocation point:")
-        print(
-            f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)"
-        )
-        print(
-            f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)"
-        )
+        print(f"Allocated: {profile_entry.alloc_bytes} bytes ({profile_entry.alloc_objects} objects)")
+        print(f"Freed: {profile_entry.free_bytes} bytes ({profile_entry.free_objects} objects)")
         print("Stack trace:")
         for filename, function, lineno in profile_entry.stack_frames:
             print(f"  {filename}:{lineno}:{function}")

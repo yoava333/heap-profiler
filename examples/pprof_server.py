@@ -1,11 +1,13 @@
-from flask import Flask, Response
 from datetime import datetime
+
 import heap_profiler
+from flask import Flask, Response
 
 app = Flask(__name__)
 
+
 # golang style pprof server
-@app.route('/debug/pprof/heap')
+@app.route("/debug/pprof/heap")
 def index() -> Response:
     filename = f"heap-{datetime.now().isoformat()}.pb.gz"
     return Response(
@@ -14,6 +16,7 @@ def index() -> Response:
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     heap_profiler.start_tracing()
-    app.run(debug=True, port=6066)
+    app.run(port=6066)
