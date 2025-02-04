@@ -1,6 +1,8 @@
 use crate::metadata_store::{self, AllocationMetadata};
 use crate::platform::{Patcher, PlatformPatcher};
-use crate::profile::{MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA, SAMPLE_RATE};
+use crate::profile::{
+    MemProfileRecord, DEFAULT_SAMPLE_RATE, PROFILE_DATA, SAMPLE_RATE, TOTAL_ALLOC_BYTES,
+};
 use crate::stack::{calculate_stack_hash, where_in_python, StackFrame};
 use lazy_static::lazy_static;
 use pyo3::ffi;
@@ -86,23 +88,14 @@ fn fast_exp_rand(mean: i32) -> i32 {
     (q_log * MINUS_LOG2 * capped_mean as f64) as i32 + 1
 }
 
+#[inline]
 fn should_sample(size: usize) -> bool {
     // Always sample large allocations
-    let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed);
-    if size >= sample_rate as usize / 2 {
-        return true;
-    }
-
-    // Fast path - avoid sampling very small allocations
-    if size < 64 {
-        return false;
-    }
-
     NEXT_SAMPLE.with(|next| {
         let current = next.get();
-        if current <= 0 {
+        if current <= size as i32 {
             // Reset the counter with exponential distribution
-            next.set(fast_exp_rand(sample_rate));
+            next.set(fast_exp_rand(SAMPLE_RATE.load(Ordering::Relaxed)));
             true
         } else {
             next.set(current - size as i32);
@@ -112,6 +105,8 @@ fn should_sample(size: usize) -> bool {
 }
 
 fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
+    TOTAL_ALLOC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+
     let should_profile = should_sample(size);
     if should_profile {
         // Record the stack trace
@@ -343,6 +338,9 @@ pub fn start_tracing(sample_rate: i32) -> PyResult<()> {
         ));
     }
     SAMPLE_RATE.store(sample_rate, Ordering::Relaxed);
+    NEXT_SAMPLE.with(|next| {
+        next.set(fast_exp_rand(SAMPLE_RATE.load(Ordering::Relaxed)));
+    });
 
     if ARENA_ALLOCATOR_ENABLED {
         setup_arena_allocator();

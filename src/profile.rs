@@ -6,16 +6,42 @@ use lazy_static::lazy_static;
 use prost::Message;
 use pyo3::prelude::*;
 use std::io::prelude::*;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 // Constants for sampling
-pub const DEFAULT_SAMPLE_RATE: i32 = 512 * 1024; // 512Kib - reduced sampling frequency for better performance
+pub const DEFAULT_SAMPLE_RATE: i32 = 128 * 1024; // 512Kib - reduced sampling frequency for better performance
+
+/// Scales heap sample data to account for sampling probability
+///
+/// # Arguments
+/// * `count` - The number of objects
+/// * `size` - The total size in bytes
+/// * `rate` - The sampling rate
+///
+/// Returns scaled (count, size) tuple
+fn scale_heap_sample(count: i64, size: i64, rate: i64) -> (i64, i64) {
+    if count == 0 || size == 0 {
+        return (0, 0);
+    }
+
+    if rate <= 1 {
+        // if rate==1 all samples were collected so no adjustment is needed.
+        // if rate<1 treat as unknown and skip scaling.
+        return (count, size);
+    }
+
+    let avg_size = size as f64 / count as f64;
+    let scale = 1.0 / (1.0 - (-avg_size / rate as f64).exp());
+
+    ((count as f64 * scale) as i64, (size as f64 * scale) as i64)
+}
 
 lazy_static! {
     pub static ref PROFILE_DATA: Mutex<HashMap<u64, MemProfileRecord>> =
         Mutex::new(HashMap::with_capacity(179_999));
     pub static ref SAMPLE_RATE: AtomicI32 = AtomicI32::new(DEFAULT_SAMPLE_RATE);
+    pub static ref TOTAL_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 }
 
 #[derive(Debug)]
@@ -223,6 +249,15 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
                 &mut next_string_id,
             ));
         }
+        profile.comment.push(get_string_id(
+            &format!(
+                "total_alloc_bytes: {}",
+                TOTAL_ALLOC_BYTES.load(Ordering::Relaxed)
+            ),
+            &mut string_index_map,
+            &mut string_table,
+            &mut next_string_id,
+        ));
     }
 
     //
@@ -355,16 +390,23 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
             location_ids.push(location_id);
         }
 
-        // Calculate inuse values
-        let inuse_objects = record.alloc_objects - record.free_objects;
-        let inuse_bytes = record.alloc_bytes - record.free_bytes;
+        // Calculate inuse values and scale them
+        let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed) as i64;
+
+        let (scaled_alloc_objects, scaled_alloc_bytes) =
+            scale_heap_sample(record.alloc_objects, record.alloc_bytes, sample_rate);
+        let (scaled_free_objects, scaled_free_bytes) =
+            scale_heap_sample(record.free_objects, record.free_bytes, sample_rate);
+
+        let inuse_objects = scaled_alloc_objects - scaled_free_objects;
+        let inuse_bytes = scaled_alloc_bytes - scaled_free_bytes;
 
         // Finally, push the Sample
         profile.sample.push(Sample {
             location_id: location_ids,
             value: vec![
-                record.alloc_objects,
-                record.alloc_bytes,
+                scaled_alloc_objects,
+                scaled_alloc_bytes,
                 inuse_objects,
                 inuse_bytes,
             ],

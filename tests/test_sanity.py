@@ -1,8 +1,15 @@
+import gc
 import os
 
 import psutil
 import pytest
-from heap_profiler import get_profile_data, get_sample_rate, start_tracing
+from heap_profiler import (
+    get_pprof_data,
+    get_profile_data,
+    get_sample_rate,
+    start_tracing,
+)
+from proto.profile_pb2 import Profile
 
 pytestmark = pytest.mark.forked
 
@@ -38,9 +45,7 @@ def test_heap_profiler_sanity():
 
     # Check that we captured some allocations
     total_alloc_bytes = sum(entry.alloc_bytes for entry in profile_data)
-    assert (
-        total_alloc_bytes - before_total_alloc_bytes > alloc_size
-    ), "Should have captured some allocations"
+    assert total_alloc_bytes - before_total_alloc_bytes > alloc_size, "Should have captured some allocations"
 
     # Verify stack frames are captured
     has_stack_frames = any(len(entry.stack_frames) > 0 for entry in profile_data)
@@ -64,9 +69,7 @@ def test_repeated_start_tracing():
 @pytest.mark.no_tracing
 def test_get_profile_data_before_start_tracing():
     profile_data = get_profile_data()
-    assert isinstance(
-        profile_data, list
-    ), "Should return an empty list before starting tracing"
+    assert isinstance(profile_data, list), "Should return an empty list before starting tracing"
     assert len(profile_data) == 0, "Profile data should be empty before tracing"
 
 
@@ -83,9 +86,7 @@ def test_zero_byte_allocation():
     zero_data = bytes(0)
     profile_data = get_profile_data()
     # Zero-byte allocations may or may not be captured, but the profiler should not crash
-    assert (
-        profile_data is not None
-    ), "Profiler should handle zero-byte allocations gracefully"
+    assert profile_data is not None, "Profiler should handle zero-byte allocations gracefully"
 
 
 def test_sample_rate():
@@ -101,9 +102,7 @@ def test_sample_rate():
 
     profile_data = get_profile_data()
     assert any(
-        "test_function" in frame[1]
-        for entry in profile_data
-        for frame in entry.stack_frames
+        "test_function" in frame[1] for entry in profile_data for frame in entry.stack_frames
     ), "Should have captured the test function"
 
     assert len(profile_data) > 1, "Should have captured at least one allocation"
@@ -135,3 +134,149 @@ def test_native_stress():
     # stack.rs where_in_python() for full details.
 
     native_stress(threads=100, iterations=1000)
+
+
+def test_heap_sampling_scaling():
+    # Enable profiling with a known sample rate for predictable scaling
+    sample_rate = 1024  # 1KB
+    start_tracing(sample_rate=sample_rate)
+
+    # Create some allocations to generate profile data
+    data = []
+    allocation_size = 1024  # 1KB allocations
+    num_allocations = 1000
+    for _ in range(num_allocations):
+        data.append("x" * allocation_size)
+
+    # Get unscaled data
+    profile_data = get_profile_data()
+    assert len(profile_data) > 0
+
+    # Get pprof data and decode it
+    pprof_bytes = get_pprof_data()
+    assert pprof_bytes is not None
+
+    # Decode the protobuf
+    profile = Profile()
+    profile.ParseFromString(pprof_bytes)
+
+    # Calculate total allocations from profile data
+    total_unscaled_bytes = sum(record.alloc_bytes for record in profile_data)
+    total_unscaled_objects = sum(record.alloc_objects for record in profile_data)
+
+    # Calculate total scaled allocations from pprof data
+    total_scaled_bytes = sum(sample.value[1] for sample in profile.sample)  # alloc_space
+    total_scaled_objects = sum(sample.value[0] for sample in profile.sample)  # alloc_objects
+
+    print(f"\nTotal unscaled: {total_unscaled_objects} objects, {total_unscaled_bytes} bytes")
+    print(f"Total scaled: {total_scaled_objects} objects, {total_scaled_bytes} bytes")
+
+    # Our test allocations should be a significant portion of the total
+    # Calculate the expected size of our test allocations
+    expected_test_bytes = allocation_size * num_allocations
+
+    # The total scaled bytes should be at least as large as our test allocations
+    assert (
+        total_scaled_bytes >= expected_test_bytes
+    ), f"Total scaled bytes {total_scaled_bytes} should be >= test allocations {expected_test_bytes}"
+
+    # The scaling should increase the totals
+    assert total_scaled_bytes > total_unscaled_bytes, "Scaled bytes should be larger than unscaled bytes"
+    assert total_scaled_objects > total_unscaled_objects, "Scaled objects should be larger than unscaled objects"
+
+    # Calculate average scaling factors
+    bytes_scale = total_scaled_bytes / total_unscaled_bytes
+    objects_scale = total_scaled_objects / total_unscaled_objects
+
+    print(f"\nScaling factors: bytes={bytes_scale:.2f}x, objects={objects_scale:.2f}x")
+
+    # The scaling factors should be reasonable (not too small or large)
+    assert 1.0 <= bytes_scale <= 100.0, f"Bytes scaling factor {bytes_scale} is out of reasonable range"
+    assert 1.0 <= objects_scale <= 100.0, f"Objects scaling factor {objects_scale} is out of reasonable range"
+
+    # Clean up
+    data = None
+    gc.collect()
+    start_tracing()
+
+
+def test_heap_sampling_edge_cases():
+    start_tracing()
+
+    # Test empty/zero case
+    pprof_data = get_pprof_data()
+    assert pprof_data is not None
+    profile = Profile()
+    profile.ParseFromString(pprof_data)
+
+    # Test very small allocations (below sample rate)
+    tiny_data = []
+    for _ in range(100):
+        tiny_data.append("x")  # 1 byte allocations
+
+    pprof_data = get_pprof_data()
+    profile = Profile()
+    profile.ParseFromString(pprof_data)
+
+    # Small allocations might be sampled less frequently but should still be valid
+    assert len(profile.sample) >= 0
+
+    # Test large allocations (above sample rate)
+    large_data = []
+    sample_rate = get_sample_rate()
+    large_data.append("x" * (sample_rate * 2))  # Allocation larger than sample rate
+
+    pprof_data = get_pprof_data()
+    profile = Profile()
+    profile.ParseFromString(pprof_data)
+
+    # For large allocations, verify scaling is close to 1
+    found_large_alloc = False
+    for sample in profile.sample:
+        if sample.value[1] >= sample_rate * 2:  # alloc_space >= 2*sample_rate
+            found_large_alloc = True
+            # For large allocations, scaled value should be close to original
+            # since probability of sampling is close to 1
+            assert (
+                abs(sample.value[1] - (sample_rate * 2)) < sample_rate
+            ), "Large allocations should have scaling factor close to 1"
+
+    assert found_large_alloc, "Should have found the large allocation in the profile"
+
+    # Clean up
+    tiny_data = None
+    large_data = None
+    gc.collect()
+    start_tracing()
+
+
+def test_heap_sampling_rate_changes():
+    # Test with default sample rate
+    start_tracing(sample_rate=128 * 1024)  # 128KB
+    data1 = ["x" * 1024 for _ in range(100)]  # 1KB allocations
+    pprof_data1 = get_pprof_data()
+    profile1 = Profile()
+    profile1.ParseFromString(pprof_data1)
+
+    # Change sample rate to something smaller
+    start_tracing(sample_rate=1024)  # 1KB
+    data2 = ["x" * 1024 for _ in range(100)]  # Same allocations
+    pprof_data2 = get_pprof_data()
+    profile2 = Profile()
+    profile2.ParseFromString(pprof_data2)
+
+    # With smaller sample rate, we should see more samples or larger scaling
+    total_alloc1 = sum(sample.value[0] for sample in profile1.sample)  # sum of alloc_objects
+    total_alloc2 = sum(sample.value[0] for sample in profile2.sample)
+
+    # Either we should have more samples, or the scaling should be larger
+    assert (
+        len(profile2.sample) >= len(profile1.sample) or total_alloc2 >= total_alloc1
+    ), "Lower sample rate should result in more samples or larger scaling"
+
+    # Clean up
+    data1 = None
+    data2 = None
+    gc.collect()
+    start_tracing()
+    start_tracing()
