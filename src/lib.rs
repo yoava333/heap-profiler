@@ -57,5 +57,8 @@ fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_pprof_data, m)?)?;
 
+    // add the version of the package
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
     Ok(())
 }
