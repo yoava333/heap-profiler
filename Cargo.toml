@@ -1,6 +1,6 @@
 [package]
 name = "heap-profiler"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -27,4 +27,5 @@ flate2 = "1.0.25"
 pyo3-build-config = { version = "0.23.4", features = ["resolve-config"] }
 
 [profile.release]
-debug = true
+strip = true
+lto = true
