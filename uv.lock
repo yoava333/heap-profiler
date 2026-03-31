@@ -119,7 +119,7 @@ wheels = [
 [[package]]
 name = "malloc-stresser"
 version = "0.1.0"
-source = { git = "https://github.com/yoava333/malloc-stresser.git#c2b8f9288e334b58167f86acb1ab9fe1feeacf5e" }
+source = { git = "https://github.com/yoava333/malloc-stresser.git#7c33716bc079f5e9e02962930d040385ae35b380" }
 
 [[package]]
 name = "markupsafe"
