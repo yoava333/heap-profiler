@@ -19,7 +19,7 @@ module-name = "heap_profiler"
 
 [tool.uv]
 dev-dependencies = [
-    "numpy>1.26",
+    "numpy>=2.3.2",
     "protobuf>=5.29.3",
     "psutil>=6.1.1",
     "pyperformance>=1.11.0",
