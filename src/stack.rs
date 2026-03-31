@@ -79,7 +79,7 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
         return 1;
     }
 
-    Python::with_gil(|_py| {
+    Python::attach(|_py| {
         // disable gc
         let _gc_guard = PythonGCGuard::new();
 
@@ -102,11 +102,15 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                 let _code_guard = RefCountGuard(code as *mut ffi::PyObject);
 
                 // Get filename from code object
-                let co_filename = (*code).co_filename;
+                let co_filename = ffi::PyObject_GetAttrString(
+                    code as *mut ffi::PyObject,
+                    c"co_filename".as_ptr(),
+                );
                 if co_filename.is_null() {
                     warn!("co_filename is null");
                     break;
                 }
+                let _co_filename_guard = RefCountGuard(co_filename);
 
                 let ascii_str = ffi::PyUnicode_AsASCIIString(co_filename);
                 if ascii_str.is_null() {
@@ -131,10 +135,14 @@ pub fn where_in_python(stack: &mut [StackFrame; 128]) -> usize {
                         debug!("Got filename: {}", fname_str);
 
                         // Get function name from code object
-                        let co_name = (*code).co_name;
+                        let co_name = ffi::PyObject_GetAttrString(
+                            code as *mut ffi::PyObject,
+                            c"co_name".as_ptr(),
+                        );
                         let mut function_name = Cow::Borrowed("");
 
                         if !co_name.is_null() {
+                            let _co_name_guard = RefCountGuard(co_name);
                             let name_ascii = ffi::PyUnicode_AsASCIIString(co_name);
                             if !name_ascii.is_null() {
                                 let name_ptr = ffi::PyBytes_AsString(name_ascii);
