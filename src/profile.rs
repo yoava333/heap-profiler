@@ -2,15 +2,15 @@ use crate::proto::*;
 use crate::stack::StackFrame;
 use crate::ProfileEntry;
 use hashbrown::HashMap;
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use prost::Message;
 use pyo3::prelude::*;
 use std::io::prelude::*;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::Mutex;
 
 // Constants for sampling
-pub const DEFAULT_SAMPLE_RATE: i32 = 128 * 1024; // 512Kib - reduced sampling frequency for better performance
+pub const DEFAULT_SAMPLE_RATE: i32 = 128 * 1024; // 128 KiB - reduced sampling frequency for better performance
 
 /// Scales heap sample data to account for sampling probability
 ///
@@ -37,30 +37,28 @@ fn scale_heap_sample(count: i64, size: i64, rate: i64) -> (i64, i64) {
     ((count as f64 * scale) as i64, (size as f64 * scale) as i64)
 }
 
-lazy_static! {
-    pub static ref PROFILE_DATA: Mutex<HashMap<u64, MemProfileRecord>> =
-        Mutex::new(HashMap::with_capacity(179_999));
-    pub static ref SAMPLE_RATE: AtomicI32 = AtomicI32::new(DEFAULT_SAMPLE_RATE);
-    pub static ref TOTAL_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
-}
+pub static PROFILE_DATA: Lazy<Mutex<HashMap<u64, MemProfileRecord>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+pub static SAMPLE_RATE: AtomicI32 = AtomicI32::new(DEFAULT_SAMPLE_RATE);
+pub static TOTAL_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MemProfileRecord {
     pub alloc_bytes: i64,
     pub free_bytes: i64,
     pub alloc_objects: i64,
     pub free_objects: i64,
-    pub stack0: [StackFrame; 128],
+    pub stack: Box<[StackFrame]>,
 }
 
 impl MemProfileRecord {
-    pub fn new(stack: [StackFrame; 128]) -> Self {
+    pub fn new(stack: &[StackFrame]) -> Self {
         Self {
             alloc_bytes: 0,
             free_bytes: 0,
             alloc_objects: 0,
             free_objects: 0,
-            stack0: stack,
+            stack: stack.to_vec().into_boxed_slice(),
         }
     }
 }
@@ -69,18 +67,23 @@ impl MemProfileRecord {
 /// --
 ///
 /// This function returns the heap profile data as a list of tuples.
+/// Values are RAW sampled counts (not scaled by sampling probability);
+/// get_pprof_data() returns scaled values.
 #[pyfunction]
 pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
-    let profile_data = PROFILE_DATA.lock().map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
-    })?;
+    // Snapshot under a short lock; building Python objects while holding the
+    // global lock would stall every sampled allocation in the process (and
+    // any sampled allocation made *by* this thread would self-deadlock).
+    let records: Vec<MemProfileRecord> = {
+        let profile_data = PROFILE_DATA.lock();
+        profile_data.values().cloned().collect()
+    };
 
-    let mut result = Vec::new();
-    for record in profile_data.values() {
+    let mut result = Vec::with_capacity(records.len());
+    for record in &records {
         let stack_frames: Vec<(String, String, i32)> = record
-            .stack0
+            .stack
             .iter()
-            .take_while(|frame| !frame.filename.is_empty())
             .map(|frame| {
                 (
                     frame.filename.to_string(),
@@ -102,6 +105,20 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
     Ok(result)
 }
 
+/// reset_profile_data()
+/// --
+///
+/// Clears all accumulated profile data, per-pointer metadata, and the total
+/// allocation counter. After a reset, inuse values mean "allocated since the
+/// reset": live allocations sampled before it are forgotten and their later
+/// frees are not counted.
+#[pyfunction]
+pub fn reset_profile_data() {
+    PROFILE_DATA.lock().clear();
+    crate::metadata_store::clear();
+    TOTAL_ALLOC_BYTES.store(0, Ordering::Relaxed);
+}
+
 /// pprof_heap()
 /// --
 ///
@@ -109,9 +126,12 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
 #[pyfunction]
 #[pyo3(signature = (tags=None, compress=false))]
 pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> PyResult<Vec<u8>> {
-    let profile_data = PROFILE_DATA.lock().map_err(|_| {
-        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to lock profile data")
-    })?;
+    // Snapshot under a short lock (see get_profile_data); record clones are
+    // cheap because frame strings are interned Cow::Borrowed references.
+    let records: Vec<MemProfileRecord> = {
+        let profile_data = PROFILE_DATA.lock();
+        profile_data.values().cloned().collect()
+    };
 
     //
     // 1. Prepare string interner
@@ -233,7 +253,7 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
         }),
         period: SAMPLE_RATE.load(Ordering::Relaxed) as i64,
         comment: Vec::new(),
-        default_sample_type: 3, // inuse_space
+        default_sample_type: inuse_space_id,
     };
 
     //
@@ -249,16 +269,16 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
                 &mut next_string_id,
             ));
         }
-        profile.comment.push(get_string_id(
-            &format!(
-                "total_alloc_bytes: {}",
-                TOTAL_ALLOC_BYTES.load(Ordering::Relaxed)
-            ),
-            &mut string_index_map,
-            &mut string_table,
-            &mut next_string_id,
-        ));
     }
+    profile.comment.push(get_string_id(
+        &format!(
+            "total_alloc_bytes: {}",
+            TOTAL_ALLOC_BYTES.load(Ordering::Relaxed)
+        ),
+        &mut string_index_map,
+        &mut string_table,
+        &mut next_string_id,
+    ));
 
     //
     // 4. Dedup structures:
@@ -281,11 +301,11 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
     //
     // 5. For each record in the data, build up the sample
     //
-    for record in profile_data.values() {
+    for record in &records {
         let mut location_ids = Vec::new();
 
         // For each frame in the stack
-        for frame in record.stack0.iter().take_while(|f| !f.filename.is_empty()) {
+        for frame in record.stack.iter() {
             // Clean up the frame data
             // – You might do your <frozen> logic here, but omitted for brevity
             let filename = &frame.filename;
@@ -443,5 +463,39 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
         Ok(compressed)
     } else {
         Ok(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_zero_is_passthrough() {
+        assert_eq!(scale_heap_sample(0, 0, 1024), (0, 0));
+        assert_eq!(scale_heap_sample(0, 100, 1024), (0, 0));
+        assert_eq!(scale_heap_sample(100, 0, 1024), (0, 0));
+    }
+
+    #[test]
+    fn scale_rate_one_means_no_adjustment() {
+        assert_eq!(scale_heap_sample(10, 1000, 1), (10, 1000));
+        assert_eq!(scale_heap_sample(10, 1000, 0), (10, 1000));
+    }
+
+    #[test]
+    fn scale_small_allocations_scale_up() {
+        // avg size 100 with rate 4096: most allocations were missed, scale > 1
+        let (count, size) = scale_heap_sample(10, 1000, 4096);
+        assert!(count > 10, "count {} should be scaled up", count);
+        assert!(size > 1000, "size {} should be scaled up", size);
+    }
+
+    #[test]
+    fn scale_large_allocations_stay_unscaled() {
+        // avg size 1 MiB with rate 1 KiB: sampling probability ~1, scale ~1
+        let (count, size) = scale_heap_sample(1, 1 << 20, 1024);
+        assert_eq!(count, 1);
+        assert_eq!(size, 1 << 20);
     }
 }

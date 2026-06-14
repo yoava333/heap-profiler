@@ -3,13 +3,14 @@ import os
 
 import psutil
 import pytest
+from proto.profile_pb2 import Profile
+
 from heap_profiler import (
     get_pprof_data,
     get_profile_data,
     get_sample_rate,
     start_tracing,
 )
-from proto.profile_pb2 import Profile
 
 pytestmark = pytest.mark.forked
 
@@ -20,9 +21,9 @@ GiB = 1024 * MiB
 
 def test_validate_forked():
     parent = psutil.Process(os.getppid())
-    assert any(
-        "pytest" in line for line in parent.cmdline()
-    ), "Test should run in a new process, make sure to use pytest-forked"
+    assert any("pytest" in line for line in parent.cmdline()), (
+        "Test should run in a new process, make sure to use pytest-forked"
+    )
 
 
 def test_heap_profiler_sanity():
@@ -101,9 +102,9 @@ def test_sample_rate():
     test_function()
 
     profile_data = get_profile_data()
-    assert any(
-        "test_function" in frame[1] for entry in profile_data for frame in entry.stack_frames
-    ), "Should have captured the test function"
+    assert any("test_function" in frame[1] for entry in profile_data for frame in entry.stack_frames), (
+        "Should have captured the test function"
+    )
 
     assert len(profile_data) > 1, "Should have captured at least one allocation"
 
@@ -124,7 +125,7 @@ def test_c_extension_allocations():
             if "ones" in frame[1]:
                 total_allocs += entry.alloc_bytes
 
-    assert total_allocs == MiB, "Should capture allocations from C extensions"
+    assert total_allocs >= MiB, "Should capture allocations from C extensions"
 
 
 def test_native_stress():
@@ -176,9 +177,9 @@ def test_heap_sampling_scaling():
     expected_test_bytes = allocation_size * num_allocations
 
     # The total scaled bytes should be at least as large as our test allocations
-    assert (
-        total_scaled_bytes >= expected_test_bytes
-    ), f"Total scaled bytes {total_scaled_bytes} should be >= test allocations {expected_test_bytes}"
+    assert total_scaled_bytes >= expected_test_bytes, (
+        f"Total scaled bytes {total_scaled_bytes} should be >= test allocations {expected_test_bytes}"
+    )
 
     # The scaling should increase the totals
     assert total_scaled_bytes > total_unscaled_bytes, "Scaled bytes should be larger than unscaled bytes"

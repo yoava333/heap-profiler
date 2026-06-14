@@ -75,13 +75,24 @@ profile_data = heap_profiler.get_profile_data()
 pprof_data = heap_profiler.get_pprof_data()
 ```
 
+`get_profile_data()` returns raw sampled counts; `get_pprof_data()` returns values scaled to estimate the full heap (pprof-style).
+
+To stop profiling or take interval snapshots:
+
+```python
+heap_profiler.stop_tracing()        # restore original allocators/hooks
+heap_profiler.reset_profile_data()  # clear accumulated data (interval profiling)
+```
+
+Set `HEAP_PROFILER_LOG=<filter>` (e.g. `heap_profiler=debug`) to enable the profiler's internal JSON logging to stderr.
+
 Each `ProfileEntry` contains:
 
 - `alloc_bytes`: Total bytes allocated
 - `free_bytes`: Total bytes freed
 - `alloc_objects`: Number of allocations
 - `free_objects`: Number of deallocations
-- `stack_frames`: List of (filename, line_number) tuples representing the stack trace
+- `stack_frames`: List of (filename, function_name, line_number) tuples representing the stack trace
 
 ## How It Works
 
@@ -91,14 +102,16 @@ The profiler works by intercepting memory allocation functions at multiple level
 2. Native malloc/free calls
 3. Dynamic library loading (dlopen)
 
-It uses statistical sampling for small allocations (< 256KB) and tracks all large allocations to maintain accuracy while minimizing overhead. Stack traces are captured for each sampled allocation to provide context about where memory is being used.
+It uses statistical sampling with a default rate of 128 KiB: any allocation at least as large as the remaining sampling budget is recorded, so large allocations are always captured. Stack traces are captured for each sampled allocation to provide context about where memory is being used.
+
+On macOS, native interception covers dylibs outside the dyld shared cache only (system libraries use chained fixups, which this patcher does not rewrite); Python-level allocations are always tracked on all platforms.
 
 ## Development
 
 ### Prerequisites
 
 - Rust toolchain (latest stable)
-- Python 3.10+
+- Python 3.11+
 - Development packages for Python
 - Cargo and maturin for building
 
@@ -145,7 +158,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-[Insert your chosen license here]
+MIT — see [LICENSE.txt](LICENSE.txt).
 
 ## Acknowledgments
 

@@ -4,9 +4,10 @@ from string import ascii_letters
 
 import numpy as np
 import pytest
-from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 from proto.profile_pb2 import Profile
 from test_utils import memory_stress
+
+from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 
 pytestmark = pytest.mark.forked
 
@@ -221,6 +222,49 @@ def test_no_memory_leaks():
 
     # Should have roughly equal allocations and frees
     assert abs(final_allocs - final_frees) < 1024 * 1024, "Memory should be properly freed"
+
+
+def test_pprof_default_sample_type_is_inuse_space():
+    start_tracing()
+    data = bytes(b"\x01" * 2 * MiB)
+
+    profile = Profile()
+    profile.ParseFromString(get_pprof_data())
+
+    assert profile.string_table[profile.default_sample_type] == "inuse_space"
+
+
+def test_pprof_total_alloc_comment_emitted_without_tags():
+    start_tracing()
+    data = bytes(b"\x01" * 2 * MiB)
+
+    profile = Profile()
+    profile.ParseFromString(get_pprof_data())
+
+    comments = [profile.string_table[i] for i in profile.comment]
+    assert any(c.startswith("total_alloc_bytes:") for c in comments)
+
+
+def test_non_ascii_filename_in_stack(tmp_path):
+    import importlib.util
+
+    mod_path = tmp_path / "módulo_ñ.py"
+    mod_path.write_text(
+        "def alloc_buffer():\n    return bytes(2 * 1024 * 1024)\n",
+        encoding="utf-8",
+    )
+    spec = importlib.util.spec_from_file_location("modulo_n", mod_path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    start_tracing()
+    data = mod.alloc_buffer()
+
+    frames = [f for entry in get_profile_data() for f in entry.stack_frames]
+    assert any("módulo_ñ" in filename for filename, _, _ in frames), "stack should contain the non-ASCII filename"
+    # The walk must not stop at the non-ASCII frame: this test file must appear too
+    assert any("test_main.py" in filename for filename, _, _ in frames)
 
 
 def test_profiler_memory_consumption():

@@ -1,5 +1,4 @@
 use libc::{c_char, c_int, c_void, dl_iterate_phdr, dl_phdr_info, mprotect, size_t, PT_DYNAMIC};
-use std::collections::HashSet;
 use std::ffi::CStr;
 use std::mem;
 use std::ptr;
@@ -24,6 +23,13 @@ const DT_STRTAB: i64 = 5;
 const DT_SYMENT: i64 = 11;
 const DT_JMPREL: i64 = 23;
 const DT_PLTRELSZ: i64 = 2;
+
+// Only these relocation types hold a plain function pointer we may overwrite.
+// Patching any other type (COPY, TLS, IRELATIVE, ...) corrupts data.
+#[cfg(target_arch = "x86_64")]
+const ALLOWED_RELOC_TYPES: &[u32] = &[6, 7]; // R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT
+#[cfg(target_arch = "aarch64")]
+const ALLOWED_RELOC_TYPES: &[u32] = &[1025, 1026]; // R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT
 
 // ELF types
 #[allow(non_camel_case_types)]
@@ -76,7 +82,6 @@ pub struct Elf64_Sym {
 struct SymbolTable {
     symtab: *const Elf64_Sym,
     strtab: *const u8,
-    #[allow(unused)]
     sym_count: usize,
 }
 
@@ -124,14 +129,12 @@ impl SymbolTable {
 /// Linux-specific implementation of the symbol patcher
 pub struct LinuxPatcher {
     hooks: Vec<Hook>,
-    patched_symbols: HashSet<String>,
     self_so_name: String,
 }
 
 /// Holds context to pass through dl_iterate_phdr's callback.
 struct ElfPatcherContext<'a> {
     restore_original: bool,
-    patched: &'a mut HashSet<String>,
     self_so_name: &'a str,
     hooks: &'a [Hook],
 }
@@ -143,7 +146,6 @@ impl Patcher for LinuxPatcher {
     fn new(self_name: String) -> Self {
         LinuxPatcher {
             hooks: Vec::new(),
-            patched_symbols: HashSet::new(),
             self_so_name: self_name,
         }
     }
@@ -163,7 +165,6 @@ impl Patcher for LinuxPatcher {
 
         let mut context = ElfPatcherContext {
             restore_original: false,
-            patched: &mut self.patched_symbols,
             self_so_name: &self.self_so_name,
             hooks: &self.hooks,
         };
@@ -191,7 +192,6 @@ impl Patcher for LinuxPatcher {
 
         let mut context = ElfPatcherContext {
             restore_original: true,
-            patched: &mut self.patched_symbols,
             self_so_name: &self.self_so_name,
             hooks: &self.hooks,
         };
@@ -204,7 +204,6 @@ impl Patcher for LinuxPatcher {
             );
         }
 
-        self.patched_symbols.clear();
         IS_HOOKING.store(false, Ordering::SeqCst);
         debug!("Finished restoring original functions");
     }
@@ -241,17 +240,9 @@ unsafe extern "C" fn phdrs_callback(
         return 0;
     }
 
-    // If hooking, skip if we have already processed this library
-    if !context.restore_original && context.patched.contains(so_name) {
-        debug!("Already processed library: {}", so_name);
-        return 0;
-    }
-
-    // Mark that we (are about to) patch this library
-    if !context.restore_original {
-        context.patched.insert(so_name.to_string());
-    }
-
+    // Note: libraries are intentionally re-patched on every pass. Patching is
+    // idempotent, and skipping by name would permanently miss a library that
+    // was dlclosed and loaded again (fresh, unpatched PLT at the same name).
     debug!("Processing library: {}", so_name);
 
     // Traverse the program headers to find PT_DYNAMIC
@@ -319,7 +310,6 @@ unsafe fn get_jump_table_type(dyn_info: *const Elf64_Dyn) -> i64 {
     0
 }
 
-#[allow(dead_code)]
 trait RelocationEntry {
     unsafe fn find_relocation_table(
         dyn_info_struct: *const Elf64_Dyn,
@@ -328,6 +318,9 @@ trait RelocationEntry {
     fn info(&self) -> u64;
     fn symbol_index(&self) -> u32 {
         (self.info() >> 32) as u32
+    }
+    fn reloc_type(&self) -> u32 {
+        (self.info() & 0xffff_ffff) as u32
     }
 }
 
@@ -425,8 +418,14 @@ unsafe fn overwrite_elf_table<T>(
         debug!("Found relocation table with {} entries", count);
         let table_slice = slice::from_raw_parts(table, count);
         for reloc in table_slice {
+            if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
+                continue;
+            }
             let symbol_addr = base_addr + reloc.offset() as u64;
             let symbol_idx = reloc.symbol_index();
+            if symbol_table.sym_count > 0 && symbol_idx as usize >= symbol_table.sym_count {
+                continue;
+            }
 
             // Get symbol from the symbol table
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
@@ -512,8 +511,14 @@ unsafe fn overwrite_plt_table<T>(
         };
 
         for reloc in table_slice {
+            if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
+                continue;
+            }
             let symbol_addr = base_addr + reloc.offset() as u64;
             let symbol_idx = reloc.symbol_index();
+            if symbol_table.sym_count > 0 && symbol_idx as usize >= symbol_table.sym_count {
+                continue;
+            }
 
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
             if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {

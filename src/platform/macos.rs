@@ -1,8 +1,6 @@
 use libc::{
-    c_char, c_int, c_void, dlclose, dlopen, dlsym, intptr_t, kern_return_t, mach_port_t, size_t,
-    vm_address_t, vm_prot_t,
+    c_char, c_int, c_void, intptr_t, kern_return_t, mach_port_t, size_t, vm_address_t, vm_prot_t,
 };
-use std::collections::HashSet;
 use std::ffi::CStr;
 use std::mem;
 use std::ptr;
@@ -15,7 +13,6 @@ use crate::platform::Hook;
 /// macOS-specific implementation of the symbol patcher
 pub struct MacOSPatcher {
     hooks: Vec<Hook>,
-    patched_symbols: HashSet<String>,
     #[allow(unused)]
     self_so_name: String,
 }
@@ -89,7 +86,6 @@ impl Patcher for MacOSPatcher {
     fn new(self_name: String) -> Self {
         MacOSPatcher {
             hooks: Vec::new(),
-            patched_symbols: HashSet::new(),
             self_so_name: self_name,
         }
     }
@@ -109,7 +105,7 @@ impl Patcher for MacOSPatcher {
 
         debug!("Starting to apply hooks...");
         unsafe {
-            patch_symbols_in_all_shared_objects(&mut self.patched_symbols, &self.hooks, false);
+            patch_symbols_in_all_shared_objects(&self.hooks, false);
         }
         IS_HOOKING.store(false, Ordering::SeqCst);
         debug!("Finished applying hooks");
@@ -126,9 +122,8 @@ impl Patcher for MacOSPatcher {
 
         debug!("Starting to restore original functions...");
         unsafe {
-            patch_symbols_in_all_shared_objects(&mut self.patched_symbols, &self.hooks, true);
+            patch_symbols_in_all_shared_objects(&self.hooks, true);
         }
-        self.patched_symbols.clear();
         IS_HOOKING.store(false, Ordering::SeqCst);
         debug!("Finished restoring original functions");
     }
@@ -161,24 +156,11 @@ unsafe fn make_page_writable(address: usize, size: usize) -> Result<(), &'static
         debug!("Successfully made memory writable");
         Ok(())
     } else {
-        warn!("vm_protect failed, trying mmap");
-
-        let map = libc::mmap(
-            page_address as *mut c_void,
-            total_size,
-            new_protection,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-            -1,
-            0,
-        );
-
-        if map != libc::MAP_FAILED {
-            debug!("Successfully created new writable mapping");
-            Ok(())
-        } else {
-            error!("Failed to make memory writable");
-            Err("Failed to make memory writable")
-        }
+        // Do NOT fall back to mmap(MAP_FIXED) here: an anonymous fixed mapping
+        // replaces the whole page with zeros, destroying every other symbol
+        // pointer on it. Skipping the symbol is always safer.
+        error!("vm_protect failed; cannot make memory writable");
+        Err("Failed to make memory writable")
     }
 }
 
@@ -186,64 +168,21 @@ unsafe fn patch_symbol_addr(hook: &Hook, addr: *mut *mut c_void, restore_origina
     debug!("Attempting to patch symbol at address: {:p}", addr);
 
     if make_page_writable(addr as usize, mem::size_of::<*mut c_void>()).is_err() {
-        warn!("Failed to make memory writable at {:p}", addr);
-
-        let mut buf = [0u8; 32];
-        let trampoline = libc::mmap(
-            ptr::null_mut(),
-            buf.len(),
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
+        warn!(
+            "Failed to make memory writable at {:p}; skipping symbol",
+            addr
         );
-
-        if trampoline != libc::MAP_FAILED {
-            debug!("Created trampoline at {:p}", trampoline);
-
-            buf[0] = 0xff;
-            buf[1] = 0x25;
-            buf[2..6].copy_from_slice(&[0, 0, 0, 0]);
-
-            let target = if restore_original {
-                hook.original_fn
-            } else {
-                hook.intercept_fn
-            };
-
-            let target_addr = target as usize;
-            buf[6..14].copy_from_slice(&target_addr.to_ne_bytes());
-
-            ptr::copy_nonoverlapping(buf.as_ptr(), trampoline as *mut u8, buf.len());
-
-            if make_page_writable(addr as usize, mem::size_of::<*mut c_void>()).is_ok() {
-                ptr::write(addr, trampoline);
-                true
-            } else {
-                error!("Failed to make trampoline memory writable");
-                libc::munmap(trampoline, buf.len());
-                false
-            }
-        } else {
-            error!("Failed to create trampoline");
-            false
-        }
-    } else {
-        if restore_original {
-            debug!(
-                "Restoring original function at {:p} with {:p}",
-                addr, hook.original_fn
-            );
-            ptr::write(addr, hook.original_fn);
-        } else {
-            debug!(
-                "Writing intercept function at {:p} with {:p}",
-                addr, hook.intercept_fn as *mut c_void
-            );
-            ptr::write(addr, hook.intercept_fn as *mut c_void);
-        }
-        true
+        return false;
     }
+
+    let target = if restore_original {
+        hook.original_fn
+    } else {
+        hook.intercept_fn
+    };
+    debug!("Writing {:p} at {:p}", target, addr);
+    ptr::write(addr, target);
+    true
 }
 
 unsafe fn get_symbol_name(addr: *const c_void) -> Option<String> {
@@ -277,6 +216,22 @@ unsafe fn patch_symbols_in_section(
         let symbol_ptr = symbol_addr_table.add(i);
         let current_fn = *symbol_ptr;
 
+        if restore_original {
+            // A patched slot points at our intercept function, so dladdr would
+            // resolve OUR symbol name, never the hooked one. Identify slots to
+            // restore by pointer identity instead.
+            for hook in hooks {
+                if current_fn == hook.intercept_fn {
+                    debug!(
+                        "Restoring original for {} at {:p}",
+                        hook.symbol_name, symbol_ptr
+                    );
+                    patch_symbol_addr(hook, symbol_ptr, true);
+                }
+            }
+            continue;
+        }
+
         if let Some(symbol_name) = get_symbol_name(current_fn) {
             debug!("Found symbol: {} at {:p}", symbol_name, current_fn);
 
@@ -290,69 +245,22 @@ unsafe fn patch_symbols_in_section(
     }
 }
 
-unsafe fn patch_stubs(
-    section: &Section64,
-    slide: u64,
-    _image_name: &CStr,
-    element_size: usize,
-    hooks: &[Hook],
-    restore_original: bool,
-) {
-    if element_size == 0 {
-        return;
-    }
-
-    debug!("Examining stubs section at address: 0x{:x}", section.addr);
-
-    let stub_base = (slide + section.addr) as u64;
-    let count = (section.size as usize) / element_size;
-
-    debug!("Found {} potential stubs", count);
-
-    for i in 0..count {
-        let stub_addr = stub_base + (i * element_size) as u64;
-        if let Some(symbol_addr) = lazy_pointer_from_stub(stub_addr) {
-            if let Some(symbol_name) = get_symbol_name(symbol_addr) {
-                debug!(
-                    "Found stub for symbol: {} at 0x{:x}",
-                    symbol_name, stub_addr
-                );
-
-                for hook in hooks {
-                    if symbol_name.ends_with(hook.symbol_name) {
-                        warn!(
-                            "symbol_name = {}, hook.symbol_name = {}!",
-                            symbol_name, hook.symbol_name
-                        );
-                        debug!("Found target symbol {} to patch in stub!", hook.symbol_name);
-                        patch_symbol_addr(hook, symbol_addr as *mut *mut c_void, restore_original);
-                    }
-                }
-            }
-        }
-    }
-}
-
-unsafe fn lazy_pointer_from_stub(_stub_addr: u64) -> Option<*mut c_void> {
-    None
-}
-
 unsafe fn patch_symbols_in_shared_object(
     header: *const MachHeader,
     slide: intptr_t,
     image_name: &CStr,
-    patched: &mut HashSet<String>,
     hooks: &[Hook],
     restore_original: bool,
 ) {
+    // NOTE: images inside the dyld shared cache use chained fixups / __stubs
+    // sections that this patcher does not support; native allocations made BY
+    // system libraries are therefore not intercepted on macOS. Python-level
+    // allocations are always tracked via the PyMem allocator hooks.
+    //
+    // Note: images are intentionally re-patched on every pass. Patching is
+    // idempotent, and skipping by name would permanently miss an image that
+    // was unloaded and loaded again at the same path.
     let image_str = image_name.to_string_lossy().to_string();
-    if !restore_original && patched.contains(&*image_str) {
-        return;
-    }
-    if !restore_original {
-        patched.insert(image_str.clone());
-    }
-
     if image_str.contains("libdyld.dylib")
         || image_str.contains("/usr/lib/system/")
         || image_str.contains("heap_profiler")
@@ -382,23 +290,9 @@ unsafe fn patch_symbols_in_shared_object(
                     as *const Section64;
                 for i in 0..segment.nsects {
                     let sect = &*section_ptr.add(i as usize);
-                    let sectname = std::str::from_utf8(&sect.sectname)
-                        .unwrap_or_default()
-                        .trim_end_matches('\0');
                     let section_type = sect.flags & SECTION_TYPE_MASK;
 
-                    if dyld_shared_cache_contains_path(image_name)
-                        && (sectname == "__auth_stubs" || sectname == "__stubs")
-                    {
-                        patch_stubs(
-                            sect,
-                            slide as u64,
-                            image_name,
-                            sect.reserved2 as usize,
-                            hooks,
-                            restore_original,
-                        );
-                    } else if section_type == S_LAZY_SYMBOL_POINTERS
+                    if section_type == S_LAZY_SYMBOL_POINTERS
                         || section_type == S_NON_LAZY_SYMBOL_POINTERS
                     {
                         patch_symbols_in_section(
@@ -416,38 +310,7 @@ unsafe fn patch_symbols_in_shared_object(
     }
 }
 
-fn dyld_shared_cache_contains_path(image_name: &CStr) -> bool {
-    static mut FN_PTR: Option<unsafe extern "C" fn(*const c_char) -> bool> = None;
-    static INIT: std::sync::Once = std::sync::Once::new();
-
-    unsafe {
-        INIT.call_once(|| {
-            let handle = dlopen(ptr::null(), 1);
-            if !handle.is_null() {
-                let sym = dlsym(
-                    handle,
-                    b"_dyld_shared_cache_contains_path\0".as_ptr() as *const _,
-                );
-                if !sym.is_null() {
-                    FN_PTR = Some(mem::transmute(sym));
-                }
-                dlclose(handle);
-            }
-        });
-
-        if let Some(fp) = FN_PTR {
-            fp(image_name.as_ptr())
-        } else {
-            false
-        }
-    }
-}
-
-unsafe fn patch_symbols_in_all_shared_objects(
-    patched: &mut HashSet<String>,
-    hooks: &[Hook],
-    restore_original: bool,
-) {
+unsafe fn patch_symbols_in_all_shared_objects(hooks: &[Hook], restore_original: bool) {
     let count = _dyld_image_count();
     for i in 0..count {
         let header = _dyld_get_image_header(i);
@@ -466,6 +329,6 @@ unsafe fn patch_symbols_in_all_shared_objects(
         {
             continue;
         }
-        patch_symbols_in_shared_object(header, slide, image_name, patched, hooks, restore_original);
+        patch_symbols_in_shared_object(header, slide, image_name, hooks, restore_original);
     }
 }

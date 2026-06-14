@@ -120,6 +120,22 @@ jobs:
           pyperformance compare baseline.json with_profiler.json > performance_comparison.txt
           cat performance_comparison.txt
 
+      - name: Fail on large regression
+        run: |
+          python - <<'EOF'
+          import re
+          import sys
+
+          text = open("performance_comparison.txt").read()
+          slowdowns = [float(m) for m in re.findall(r"(\d+\.\d+)x slower", text)]
+          worst = max(slowdowns, default=1.0)
+          print(f"worst per-benchmark slowdown: {worst:.2f}x")
+          # Generous bound: catches catastrophic regressions (e.g. logging in
+          # the hot path), not noise.
+          if worst > 2.0:
+              sys.exit(f"performance regression: {worst:.2f}x slower than baseline")
+          EOF
+
       - name: Upload performance results
         uses: actions/upload-artifact@v4
         with:

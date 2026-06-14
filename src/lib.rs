@@ -1,5 +1,6 @@
 // Main library file that re-exports and coordinates modules
 mod allocator;
+mod fork;
 mod interner;
 mod metadata_store;
 mod platform;
@@ -15,6 +16,10 @@ use tracing_subscriber::EnvFilter;
 pub use allocator::{start_tracing, MyAllocator};
 pub use profile::{get_pprof_data, get_profile_data, PROFILE_DATA};
 pub use stack::{where_in_python, StackFrame};
+
+/// Serializes unit tests that mutate the global profile/metadata stores.
+#[cfg(test)]
+pub(crate) static GLOBAL_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 #[pyclass(get_all)]
 pub struct ProfileEntry {
@@ -38,24 +43,29 @@ impl ProfileEntry {
 /// Initialize the heap profiler
 #[pymodule]
 fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Initialize tracing subscriber with a more verbose filter
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_file(true)
-        .with_ansi(false)
-        .with_line_number(true)
-        .with_target(true)
-        .json()
-        .with_writer(std::io::stderr)
-        .try_init();
+    // Only install a tracing subscriber when explicitly requested: a profiler
+    // embedded in a host application must not hijack its tracing registry.
+    if let Ok(filter) = std::env::var("HEAP_PROFILER_LOG") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_file(true)
+            .with_ansi(false)
+            .with_line_number(true)
+            .with_target(true)
+            .json()
+            .with_writer(std::io::stderr)
+            .try_init();
+    }
 
     debug!("Initializing heap profiler");
 
     m.add_class::<ProfileEntry>()?;
     m.add_function(wrap_pyfunction!(allocator::start_tracing, m)?)?;
+    m.add_function(wrap_pyfunction!(allocator::stop_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(allocator::get_sample_rate, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_pprof_data, m)?)?;
+    m.add_function(wrap_pyfunction!(profile::reset_profile_data, m)?)?;
 
     // add the version of the package
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
