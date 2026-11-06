@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 thread_local! {
-    static IN_MALLOC: Cell<bool> = Cell::new(false);
+    static IN_MALLOC: Cell<bool> = const { Cell::new(false) };
 }
 
 pub struct MallocRecursionGuard {
@@ -62,4 +62,9 @@ impl Drop for PythonGCGuard {
             }
         }
     }
+}
+
+/// Used by pthread_atfork: suppression spans prepare through parent/child.
+pub(crate) fn replace_in_malloc(value: bool) -> bool {
+    IN_MALLOC.with(|state| state.replace(value))
 }

@@ -15,6 +15,8 @@ def setup_test_environment(request):
     import heap_profiler
 
     heap_profiler.start_tracing()
-    # This fixture will run automatically for each test
-    yield  # This is where the test runs
-    # Any cleanup after the test would go here
+    try:
+        yield
+    finally:
+        heap_profiler.stop_tracing()
+        heap_profiler.reset_profile_data()

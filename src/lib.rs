@@ -1,3 +1,14 @@
+#[cfg(Py_GIL_DISABLED)]
+compile_error!("heap-profiler requires a GIL-enabled CPython build");
+#[cfg(not(all(
+    target_pointer_width = "64",
+    any(target_arch = "aarch64", target_arch = "x86_64"),
+    any(target_os = "linux", target_os = "macos")
+)))]
+compile_error!("heap-profiler supports 64-bit Linux/macOS on x86_64 and aarch64");
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+compile_error!("the ELF native patcher currently requires glibc");
+
 // Main library file that re-exports and coordinates modules
 mod allocator;
 mod fork;
@@ -8,6 +19,7 @@ mod profile;
 mod proto;
 mod recursion_guard;
 mod stack;
+mod sync;
 
 use pyo3::prelude::*;
 use tracing::debug;
@@ -19,7 +31,7 @@ pub use stack::{where_in_python, StackFrame};
 
 /// Serializes unit tests that mutate the global profile/metadata stores.
 #[cfg(test)]
-pub(crate) static GLOBAL_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+pub(crate) static GLOBAL_TEST_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
 #[pyclass(get_all)]
 pub struct ProfileEntry {
@@ -43,6 +55,11 @@ impl ProfileEntry {
 /// Initialize the heap profiler
 #[pymodule]
 fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    if unsafe { pyo3::ffi::PyInterpreterState_Get() != pyo3::ffi::PyInterpreterState_Main() } {
+        return Err(pyo3::exceptions::PyImportError::new_err(
+            "heap-profiler does not support subinterpreters",
+        ));
+    }
     // Only install a tracing subscriber when explicitly requested: a profiler
     // embedded in a host application must not hijack its tracing registry.
     if let Ok(filter) = std::env::var("HEAP_PROFILER_LOG") {
@@ -63,6 +80,7 @@ fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(allocator::start_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(allocator::stop_tracing, m)?)?;
     m.add_function(wrap_pyfunction!(allocator::get_sample_rate, m)?)?;
+    m.add_function(wrap_pyfunction!(allocator::refresh_native_hooks, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_profile_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::get_pprof_data, m)?)?;
     m.add_function(wrap_pyfunction!(profile::reset_profile_data, m)?)?;

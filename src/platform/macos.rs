@@ -4,7 +4,7 @@ use libc::{
 use std::ffi::CStr;
 use std::mem;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use tracing::{debug, error, warn};
 
 use super::Patcher;
@@ -29,6 +29,16 @@ extern "C" {
         set_maximum: c_int,
         new_protection: vm_prot_t,
     ) -> kern_return_t;
+    fn mach_vm_region(
+        task: mach_port_t,
+        address: *mut u64,
+        size: *mut u64,
+        flavor: c_int,
+        info: *mut c_int,
+        count: *mut u32,
+        object: *mut mach_port_t,
+    ) -> kern_return_t;
+    fn mach_port_deallocate(task: mach_port_t, name: mach_port_t) -> kern_return_t;
     fn _dyld_image_count() -> u32;
     fn _dyld_get_image_header(index: u32) -> *const MachHeader;
     fn _dyld_get_image_vmaddr_slide(index: u32) -> intptr_t;
@@ -165,37 +175,72 @@ unsafe fn make_page_writable(address: usize, size: usize) -> Result<(), &'static
 }
 
 unsafe fn patch_symbol_addr(hook: &Hook, addr: *mut *mut c_void, restore_original: bool) -> bool {
-    debug!("Attempting to patch symbol at address: {:p}", addr);
-
-    if make_page_writable(addr as usize, mem::size_of::<*mut c_void>()).is_err() {
-        warn!(
-            "Failed to make memory writable at {:p}; skipping symbol",
-            addr
-        );
+    if !(addr as usize).is_multiple_of(mem::align_of::<AtomicPtr<c_void>>()) {
         return false;
     }
-
+    let slot = &*addr.cast::<AtomicPtr<c_void>>();
+    let current = slot.load(Ordering::Acquire);
+    let expected = if restore_original {
+        hook.intercept_fn
+    } else {
+        hook.original_fn
+    };
+    if current != expected {
+        return false;
+    }
+    debug!(symbol = hook.symbol_name, "Patching native slot");
+    // Query current protection: dyld may have sealed __DATA_CONST read-only
+    // even when the Mach-O segment's initprot says writable.
+    let mut region_address = addr as u64;
+    let mut region_size = 0;
+    let mut info = [0i32; 32];
+    let mut count = 9;
+    let mut object = 0;
+    let task = mach_task_self();
+    if mach_vm_region(
+        task,
+        &mut region_address,
+        &mut region_size,
+        9,
+        info.as_mut_ptr(),
+        &mut count,
+        &mut object,
+    ) != 0
+    {
+        return false;
+    }
+    if object != 0 {
+        mach_port_deallocate(task, object);
+    }
+    if region_address > addr as u64 {
+        return false;
+    }
+    let protection = info[0];
+    if protection & libc::PROT_EXEC != 0 {
+        return false;
+    }
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+    if page_size <= 0 {
+        return false;
+    }
+    let page_size = page_size as usize;
+    let page = addr as usize & !(page_size - 1);
+    let writable = protection & libc::PROT_WRITE != 0;
+    if !writable && make_page_writable(addr as usize, mem::size_of::<*mut c_void>()).is_err() {
+        return false;
+    }
     let target = if restore_original {
         hook.original_fn
     } else {
         hook.intercept_fn
     };
-    debug!("Writing {:p} at {:p}", target, addr);
-    ptr::write(addr, target);
-    true
-}
-
-unsafe fn get_symbol_name(addr: *const c_void) -> Option<String> {
-    let mut info: libc::Dl_info = mem::zeroed();
-    if libc::dladdr(addr, &mut info) != 0 && !info.dli_sname.is_null() {
-        Some(
-            CStr::from_ptr(info.dli_sname)
-                .to_string_lossy()
-                .into_owned(),
-        )
-    } else {
-        None
+    let changed = slot
+        .compare_exchange(expected, target, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok();
+    if !writable && vm_protect(task, page as vm_address_t, page_size, 0, protection) != 0 {
+        warn!("Failed to restore symbol page protection");
     }
+    changed
 }
 
 unsafe fn patch_symbols_in_section(
@@ -207,40 +252,15 @@ unsafe fn patch_symbols_in_section(
 ) {
     debug!("Examining section at address: 0x{:x}", section.addr);
 
-    let symbol_addr_table = (slide + section.addr) as *mut *mut c_void;
+    let symbol_addr_table = slide.wrapping_add(section.addr) as *mut *mut c_void;
     let count = (section.size as usize) / mem::size_of::<*mut c_void>();
 
     debug!("Found {} potential symbol pointers", count);
 
     for i in 0..count {
         let symbol_ptr = symbol_addr_table.add(i);
-        let current_fn = *symbol_ptr;
-
-        if restore_original {
-            // A patched slot points at our intercept function, so dladdr would
-            // resolve OUR symbol name, never the hooked one. Identify slots to
-            // restore by pointer identity instead.
-            for hook in hooks {
-                if current_fn == hook.intercept_fn {
-                    debug!(
-                        "Restoring original for {} at {:p}",
-                        hook.symbol_name, symbol_ptr
-                    );
-                    patch_symbol_addr(hook, symbol_ptr, true);
-                }
-            }
-            continue;
-        }
-
-        if let Some(symbol_name) = get_symbol_name(current_fn) {
-            debug!("Found symbol: {} at {:p}", symbol_name, current_fn);
-
-            for hook in hooks {
-                if symbol_name == hook.symbol_name {
-                    debug!("Found target symbol {} to patch!", hook.symbol_name);
-                    patch_symbol_addr(hook, symbol_ptr, restore_original);
-                }
-            }
+        for hook in hooks {
+            patch_symbol_addr(hook, symbol_ptr, restore_original);
         }
     }
 }
@@ -260,7 +280,7 @@ unsafe fn patch_symbols_in_shared_object(
     // Note: images are intentionally re-patched on every pass. Patching is
     // idempotent, and skipping by name would permanently miss an image that
     // was unloaded and loaded again at the same path.
-    let image_str = image_name.to_string_lossy().to_string();
+    let image_str = image_name.to_string_lossy();
     if image_str.contains("libdyld.dylib")
         || image_str.contains("/usr/lib/system/")
         || image_str.contains("heap_profiler")
@@ -268,45 +288,48 @@ unsafe fn patch_symbols_in_shared_object(
         return;
     }
 
+    if (*header).magic != 0xfeedfacf || (*header).flags & 0x80000000 != 0 {
+        return;
+    }
     let ncmds = (*header).ncmds;
-    let first_cmd =
-        (header as *const u8).add(mem::size_of::<MachHeader>()) as *const SegmentCommand64;
-    let mut cmd_ptr = first_cmd;
-
+    let commands = (header as *const u8).add(mem::size_of::<MachHeader>());
+    let end = commands.add((*header).sizeofcmds as usize) as usize;
+    let mut cursor = commands;
     for _ in 0..ncmds {
-        let segment = &*cmd_ptr;
-        if segment.cmd == 0x19 {
-            let segname = segment.segname;
-            let segname_str = std::str::from_utf8(&segname)
-                .unwrap_or_default()
-                .trim_end_matches('\0');
-
-            if segname_str == "__DATA"
-                || segname_str == "__DATA_CONST"
-                || segname_str == "__AUTH_CONST"
-                || segname_str == "__TEXT"
-            {
-                let section_ptr = (cmd_ptr as *const u8).add(mem::size_of::<SegmentCommand64>())
-                    as *const Section64;
-                for i in 0..segment.nsects {
-                    let sect = &*section_ptr.add(i as usize);
-                    let section_type = sect.flags & SECTION_TYPE_MASK;
-
-                    if section_type == S_LAZY_SYMBOL_POINTERS
-                        || section_type == S_NON_LAZY_SYMBOL_POINTERS
-                    {
-                        patch_symbols_in_section(
-                            sect,
-                            slide as u64,
-                            image_name,
-                            hooks,
-                            restore_original,
-                        );
+        if cursor as usize + 8 > end {
+            break;
+        }
+        let cmd = ptr::read_unaligned(cursor.cast::<u32>());
+        let cmdsize = ptr::read_unaligned(cursor.add(4).cast::<u32>()) as usize;
+        if cmdsize < 8 || cmdsize > end - cursor as usize {
+            break;
+        }
+        if cmd == 0x19 && cmdsize >= mem::size_of::<SegmentCommand64>() {
+            let segment = &*cursor.cast::<SegmentCommand64>();
+            // __AUTH* entries require pointer authentication we cannot supply.
+            if !segment.segname.starts_with(b"__AUTH") {
+                let section_bytes = cmdsize - mem::size_of::<SegmentCommand64>();
+                if segment.nsects as usize <= section_bytes / mem::size_of::<Section64>() {
+                    let sections = cursor
+                        .add(mem::size_of::<SegmentCommand64>())
+                        .cast::<Section64>();
+                    for i in 0..segment.nsects as usize {
+                        let section = &*sections.add(i);
+                        let kind = section.flags & SECTION_TYPE_MASK;
+                        if kind == S_LAZY_SYMBOL_POINTERS || kind == S_NON_LAZY_SYMBOL_POINTERS {
+                            patch_symbols_in_section(
+                                section,
+                                slide as u64,
+                                image_name,
+                                hooks,
+                                restore_original,
+                            );
+                        }
                     }
                 }
             }
         }
-        cmd_ptr = (cmd_ptr as *const u8).add(segment.cmdsize as usize) as *const SegmentCommand64;
+        cursor = cursor.add(cmdsize);
     }
 }
 
