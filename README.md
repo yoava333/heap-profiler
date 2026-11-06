@@ -136,7 +136,10 @@ profile; reset in the child when you want child-only measurements.
 
 Profile history grows with the number of distinct stacks and sampled live
 pointers. Reset periodically to release accumulated history and interned strings.
-Allocator wrapper contexts are retained for safety and reused across restarts.
+Allocator callback generations are retained for safety and reused across restarts.
+There are 96 slots for distinct domain/allocator-table combinations; repeated
+starts with the same allocator set reuse their slots. Exhausting the slots raises
+`RuntimeError` before installing new Python hooks.
 
 ## Development
 
@@ -201,3 +204,6 @@ This project uses:
 - [pprof](https://github.com/google/pprof) format for profile data visualization
 
 See [the audit report](docs/deep-review.md) for findings, CPython source references, and validation results.
+
+The [second review](docs/second-review.md) records additional fork, RAW allocator,
+and thread-teardown findings, fixes, and validation.

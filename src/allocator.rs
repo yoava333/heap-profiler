@@ -8,9 +8,8 @@ use crate::sync::Mutex;
 use once_cell::sync::Lazy;
 use pyo3::ffi;
 use pyo3::prelude::*;
-use rand::Rng;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use crate::recursion_guard::MallocRecursionGuard;
 
@@ -33,8 +32,8 @@ pub(crate) struct SavedAllocators {
     obj: ffi::PyMemAllocatorEx,
     installed: [ffi::PyMemAllocatorEx; 3],
 }
-// SAFETY: the raw pointers inside are CPython allocator state, valid for the
-// process lifetime; access is serialized by the Mutex.
+// SAFETY: these are captured CPython allocator tables. Their callback/context
+// lifetimes follow the installed wrapping chain; table access is mutex-protected.
 unsafe impl Send for SavedAllocators {}
 
 pub(crate) static SAVED_ALLOCATORS: Lazy<Mutex<Option<SavedAllocators>>> =
@@ -46,6 +45,8 @@ struct SamplerState {
     rate: i32,
 }
 thread_local! {
+    // No destructor: allocation callbacks can run from C++ TLS destructors.
+    static RANDOM_STATE: Cell<u64> = const { Cell::new(0) };
     static SAMPLER: Cell<SamplerState> = const { Cell::new(SamplerState { remaining: 0, rate: 0 }) };
 }
 
@@ -66,13 +67,15 @@ impl MyAllocator {
         }
     }
 
-    pub fn get_allocator_ex(&self) -> ffi::PyMemAllocatorEx {
+    pub fn get_allocator_ex(&self, slot: usize) -> ffi::PyMemAllocatorEx {
         ffi::PyMemAllocatorEx {
-            ctx: std::ptr::null_mut(),
-            malloc: Some(my_malloc),
-            calloc: Some(my_calloc),
-            realloc: Some(my_realloc),
-            free: Some(my_free),
+            // Preserve the underlying context across installation/restoration.
+            // RAW callers can read function and ctx from different table versions.
+            ctx: self.original_allocator.ctx,
+            malloc: Some(PYTHON_MALLOC[slot]),
+            calloc: Some(PYTHON_CALLOC[slot]),
+            realloc: Some(PYTHON_REALLOC[slot]),
+            free: Some(PYTHON_FREE[slot]),
         }
     }
 }
@@ -87,19 +90,51 @@ pub fn get_default_allocator() -> ffi::PyMemAllocatorEx {
     }
 }
 
-// Helper functions for sampling
+// SplitMix64 is used only for statistical sampling, not for cryptography.
+// State lives in a const-initialized, non-dropping TLS Cell. rand::thread_rng
+// can panic after its destructor has run while C++ TLS destructors still malloc.
+static SEED_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn mix_random(mut value: u64) -> u64 {
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
 fn fast_exp_rand(mean: i32) -> i64 {
     if mean <= 0 {
         return 0;
     }
+    let random = RANDOM_STATE.with(|cell| {
+        let mut state = cell.get();
+        if state == 0 {
+            let sequence = SEED_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let thread = unsafe { libc::pthread_self() } as usize as u64;
+            let process = unsafe { libc::getpid() } as u64;
+            state = mix_random(sequence ^ thread ^ process.rotate_left(32));
+        }
+        state = state.wrapping_add(0x9e3779b97f4a7c15);
+        cell.set(state);
+        mix_random(state)
+    });
+    // 53 random bits avoid the 26-bit generator's inflated minimum-interval
+    // mass at large rates (32x too frequent for one-byte requests at i32::MAX).
+    let uniform = (random >> 11) as f64 * (1.0 / 9007199254740992.0);
+    exp_interval(mean, uniform)
+}
 
-    let random_bits = 26;
-    let q = (rand::thread_rng().gen::<u32>() % (1 << random_bits)) + 1;
-    let q_log = (q as f64).log2() - random_bits as f64;
-    let q_log = q_log.min(0.0);
+fn exp_interval(mean: i32, uniform: f64) -> i64 {
+    (-(-uniform).ln_1p() * mean as f64) as i64 + 1
+}
 
-    const MINUS_LOG2: f64 = -std::f64::consts::LN_2;
-    (q_log * MINUS_LOG2 * mean as f64) as i64 + 1
+pub(crate) fn reset_sampler_after_fork() {
+    RANDOM_STATE.with(|state| state.set(0));
+    SAMPLER.with(|state| {
+        state.set(SamplerState {
+            remaining: 0,
+            rate: 0,
+        })
+    });
 }
 
 #[inline]
@@ -128,7 +163,17 @@ fn should_sample(size: usize, rate: i32) -> bool {
     })
 }
 
+type ProfileTransaction = crate::sync::MutexGuard<'static, ()>;
+
 fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
+    handle_malloc_in_transaction(ptr, size, None);
+}
+
+fn handle_malloc_in_transaction(
+    ptr: *mut std::ffi::c_void,
+    size: usize,
+    transaction: Option<&ProfileTransaction>,
+) {
     if !TRACING.load(Ordering::Acquire) {
         return;
     }
@@ -137,7 +182,9 @@ fn handle_malloc(ptr: *mut std::ffi::c_void, size: usize) {
     let rate = SAMPLE_RATE.load(Ordering::Relaxed);
     let should_profile = should_sample(size, rate);
     if should_profile {
-        let _transaction = crate::profile::PROFILE_TRANSACTION.lock();
+        let _transaction = transaction
+            .is_none()
+            .then(|| crate::profile::PROFILE_TRANSACTION.lock());
         if !TRACING.load(Ordering::Acquire) {
             return;
         }
@@ -193,11 +240,19 @@ fn record_free(metadata: AllocationMetadata) {
     }
 }
 
-fn handle_free(ptr: *mut std::ffi::c_void) {
+/// Probe without removing metadata, then drain the full allocator operation
+/// under the fork/reset transaction. Until acquired, a fork sees the original
+/// live allocation AND its metadata, never just one of them.
+fn begin_change(ptr: *mut std::ffi::c_void) -> Option<ProfileTransaction> {
+    metadata_store::contains_metadata(ptr).then(|| crate::profile::PROFILE_TRANSACTION.lock())
+}
+
+fn handle_free(ptr: *mut std::ffi::c_void) -> Option<ProfileTransaction> {
+    let transaction = begin_change(ptr)?;
     if let Some(metadata) = metadata_store::remove_metadata(ptr) {
-        let _transaction = crate::profile::PROFILE_TRANSACTION.lock();
         record_free(metadata);
     }
+    Some(transaction)
 }
 
 /// Metadata for `ptr` must be removed BEFORE the underlying realloc/free runs:
@@ -213,9 +268,12 @@ fn handle_realloc_end(
     old_ptr: *mut std::ffi::c_void,
     new_ptr: *mut std::ffi::c_void,
     size: usize,
+    transaction: Option<&ProfileTransaction>,
 ) {
+    let owned = (tracked.is_some() && transaction.is_none())
+        .then(|| crate::profile::PROFILE_TRANSACTION.lock());
+    let transaction = transaction.or(owned.as_ref());
     if new_ptr.is_null() {
-        let _transaction = crate::profile::PROFILE_TRANSACTION.lock();
         // realloc failed: the old allocation is still live, restore its metadata
         if let Some(metadata) = tracked {
             if metadata.generation == crate::profile::GENERATION.load(Ordering::Relaxed) {
@@ -225,10 +283,9 @@ fn handle_realloc_end(
         return;
     }
     if let Some(metadata) = tracked {
-        let _transaction = crate::profile::PROFILE_TRANSACTION.lock();
         record_free(metadata);
     }
-    handle_malloc(new_ptr, size);
+    handle_malloc_in_transaction(new_ptr, size, transaction);
 }
 
 #[no_mangle]
@@ -237,14 +294,11 @@ unsafe extern "C" fn handle_native_malloc(size: libc::size_t) -> *mut libc::c_vo
     let original: unsafe extern "C" fn(libc::size_t) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_MALLOC.load(Ordering::Relaxed));
     let result = original(size);
-    let _errno = (!_guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!_guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
     if !_guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) && !result.is_null() {
         handle_malloc(result, size);
     }
-
-    drop(_guard);
 
     result
 }
@@ -252,21 +306,20 @@ unsafe extern "C" fn handle_native_malloc(size: libc::size_t) -> *mut libc::c_vo
 #[no_mangle]
 unsafe extern "C" fn handle_native_free(ptr: *mut libc::c_void) {
     let guard = MallocRecursionGuard::new();
-    let _errno = (!guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
     // We need to call our API before we call the real free implementation
     // to make sure that the pointer is not reused in-between.
-    if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) {
-        handle_free(ptr);
-    }
+    let _transaction = if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) {
+        handle_free(ptr)
+    } else {
+        None
+    };
 
     // Call the original free implementation
     let original: unsafe extern "C" fn(*mut libc::c_void) =
         std::mem::transmute(ORIGINAL_FREE.load(Ordering::Relaxed));
     original(ptr);
-
-    drop(guard);
 }
 
 #[no_mangle]
@@ -278,14 +331,11 @@ unsafe extern "C" fn handle_native_calloc(
     let original: unsafe extern "C" fn(libc::size_t, libc::size_t) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_CALLOC.load(Ordering::Relaxed));
     let result = original(nelem, elsize);
-    let _errno = (!guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
     if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) && !result.is_null() {
         handle_malloc(result, nelem * elsize);
     }
-
-    drop(guard);
 
     result
 }
@@ -296,31 +346,30 @@ unsafe extern "C" fn handle_native_realloc(
     size: libc::size_t,
 ) -> *mut libc::c_void {
     let guard = MallocRecursionGuard::new();
-    let tracked =
-        if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) && !ptr.is_null() {
-            handle_realloc_start(ptr)
-        } else {
-            None
-        };
+    let tracking = !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire);
+    let transaction = if tracking { begin_change(ptr) } else { None };
+    let tracked = if transaction.is_some() {
+        handle_realloc_start(ptr)
+    } else {
+        None
+    };
     let original: unsafe extern "C" fn(*mut libc::c_void, libc::size_t) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_REALLOC.load(Ordering::Relaxed));
     let result = original(ptr, size);
-    let _errno = (!guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
-    if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) {
-        // On glibc and Darwin realloc(p, 0) releases p even when returning NULL.
+    if tracking {
+        // On glibc/Darwin realloc(p, 0) frees p even if it returns NULL.
         if !ptr.is_null() && size == 0 && result.is_null() {
             if let Some(metadata) = tracked {
-                let _transaction = crate::profile::PROFILE_TRANSACTION.lock();
                 record_free(metadata);
             }
         } else {
-            handle_realloc_end(tracked, ptr, result, size);
+            handle_realloc_end(tracked, ptr, result, size, transaction.as_ref());
         }
     }
-
-    drop(guard);
+    // Unlock while the recursion and errno guards are still active.
+    drop(transaction);
 
     result
 }
@@ -338,8 +387,7 @@ unsafe extern "C" fn handle_native_posix_memalign(
         libc::size_t,
     ) -> libc::c_int = std::mem::transmute(ORIGINAL_POSIX_MEMALIGN.load(Ordering::Relaxed));
     let result = original(memptr, alignment, size);
-    let _errno = (!guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
     if !guard.was_in_malloc()
         && NATIVE_ENABLED.load(Ordering::Acquire)
@@ -362,8 +410,7 @@ unsafe extern "C" fn handle_native_aligned_alloc(
     let original: unsafe extern "C" fn(libc::size_t, libc::size_t) -> *mut libc::c_void =
         std::mem::transmute(ORIGINAL_ALIGNED_ALLOC.load(Ordering::Relaxed));
     let result = original(alignment, size);
-    let _errno = (!guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire))
-        .then(|| ErrnoGuard::new());
+    let _errno = (!guard.was_in_malloc()).then(|| ErrnoGuard::new());
 
     if !guard.was_in_malloc() && NATIVE_ENABLED.load(Ordering::Acquire) && !result.is_null() {
         handle_malloc(result, size);
@@ -516,22 +563,22 @@ pub fn start_tracing(sample_rate: i32, native: bool) -> PyResult<()> {
         return Ok(());
     }
 
+    let mut new_raw_allocator = cached_allocator(
+        original_raw_allocator,
+        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_RAW,
+    )?;
+    let mut new_mem_allocator = cached_allocator(
+        original_mem_allocator,
+        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_MEM,
+    )?;
+    let mut new_obj_allocator = cached_allocator(
+        original_obj_allocator,
+        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_OBJ,
+    )?;
     if native {
         init_native_hooks()?;
     }
     NATIVE_ENABLED.store(native, Ordering::Release);
-    let mut new_raw_allocator = cached_allocator(
-        original_raw_allocator,
-        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_RAW,
-    );
-    let mut new_mem_allocator = cached_allocator(
-        original_mem_allocator,
-        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_MEM,
-    );
-    let mut new_obj_allocator = cached_allocator(
-        original_obj_allocator,
-        ffi::PyMemAllocatorDomain::PYMEM_DOMAIN_OBJ,
-    );
     *SAVED_ALLOCATORS.lock() = Some(SavedAllocators {
         raw: original_raw_allocator,
         mem: original_mem_allocator,
@@ -539,6 +586,8 @@ pub fn start_tracing(sample_rate: i32, native: bool) -> PyResult<()> {
         installed: [new_raw_allocator, new_mem_allocator, new_obj_allocator],
     });
 
+    // Publish immutable slot state before exposing callbacks to RAW threads.
+    std::sync::atomic::fence(Ordering::SeqCst);
     // SAFETY: PyMem_SetAllocator is safe to call with valid allocator structs
     // The allocators are properly initialized and will live for the program's duration
     unsafe {
@@ -706,7 +755,12 @@ extern "C" fn my_realloc(
 
     let guard = MallocRecursionGuard::new();
 
-    let tracked = if !guard.was_in_malloc() {
+    let transaction = if !guard.was_in_malloc() {
+        begin_change(ptr)
+    } else {
+        None
+    };
+    let tracked = if transaction.is_some() {
         handle_realloc_start(ptr)
     } else {
         None
@@ -717,9 +771,10 @@ extern "C" fn my_realloc(
     let _errno = (!guard.was_in_malloc()).then(|| unsafe { ErrnoGuard::new() });
 
     if !guard.was_in_malloc() {
-        handle_realloc_end(tracked, ptr, new_ptr, new_size);
+        handle_realloc_end(tracked, ptr, new_ptr, new_size, transaction.as_ref());
     }
 
+    drop(transaction);
     new_ptr
 }
 
@@ -737,9 +792,11 @@ extern "C" fn my_free(ctx: *mut std::ffi::c_void, ptr: *mut std::ffi::c_void) {
 
     // Accounting is pure Rust (locks only, no Python C-API), so it is safe in
     // any interpreter state; the underlying free must ALWAYS run.
-    if !_guard.was_in_malloc() {
-        handle_free(ptr);
-    }
+    let _transaction = if !_guard.was_in_malloc() {
+        handle_free(ptr)
+    } else {
+        None
+    };
 
     // SAFETY: original_allocator.free is guaranteed to be Some
     (original_allocator.free.unwrap())(original_allocator.ctx, ptr);
@@ -790,23 +847,82 @@ fn same_allocator(a: &ffi::PyMemAllocatorEx, b: &ffi::PyMemAllocatorEx) -> bool 
         && a.free.map(|f| f as usize) == b.free.map(|f| f as usize)
 }
 
+// Each immutable slot has distinct C callbacks. They ignore CPython's ctx
+// argument and forward through that slot's captured original table. Keeping the
+// public ctx unchanged makes mixed old/new table reads safe for both callbacks.
+// Slots are never reused: in-flight calls and later allocator wrappers can keep
+// an earlier callback generation alive indefinitely.
+const ALLOCATOR_SLOT_COUNT: usize = 96;
+static ALLOCATOR_SLOTS: [AtomicPtr<MyAllocator>; ALLOCATOR_SLOT_COUNT] =
+    [const { AtomicPtr::new(std::ptr::null_mut()) }; ALLOCATOR_SLOT_COUNT];
+
+fn slot_context<const SLOT: usize>() -> *mut libc::c_void {
+    let context = ALLOCATOR_SLOTS[SLOT].load(Ordering::Acquire);
+    debug_assert!(!context.is_null());
+    context.cast()
+}
+extern "C" fn slot_malloc<const SLOT: usize>(
+    _ctx: *mut libc::c_void,
+    size: usize,
+) -> *mut libc::c_void {
+    my_malloc(slot_context::<SLOT>(), size)
+}
+extern "C" fn slot_calloc<const SLOT: usize>(
+    _ctx: *mut libc::c_void,
+    count: usize,
+    size: usize,
+) -> *mut libc::c_void {
+    my_calloc(slot_context::<SLOT>(), count, size)
+}
+extern "C" fn slot_realloc<const SLOT: usize>(
+    _ctx: *mut libc::c_void,
+    ptr: *mut libc::c_void,
+    size: usize,
+) -> *mut libc::c_void {
+    my_realloc(slot_context::<SLOT>(), ptr, size)
+}
+extern "C" fn slot_free<const SLOT: usize>(_ctx: *mut libc::c_void, ptr: *mut libc::c_void) {
+    my_free(slot_context::<SLOT>(), ptr)
+}
+macro_rules! allocator_callbacks {
+    ($($slot:literal),* $(,)?) => {
+        const PYTHON_MALLOC: [extern "C" fn(*mut libc::c_void, usize) -> *mut libc::c_void; ALLOCATOR_SLOT_COUNT] = [$(slot_malloc::<$slot>),*];
+        const PYTHON_CALLOC: [extern "C" fn(*mut libc::c_void, usize, usize) -> *mut libc::c_void; ALLOCATOR_SLOT_COUNT] = [$(slot_calloc::<$slot>),*];
+        const PYTHON_REALLOC: [extern "C" fn(*mut libc::c_void, *mut libc::c_void, usize) -> *mut libc::c_void; ALLOCATOR_SLOT_COUNT] = [$(slot_realloc::<$slot>),*];
+        const PYTHON_FREE: [extern "C" fn(*mut libc::c_void, *mut libc::c_void); ALLOCATOR_SLOT_COUNT] = [$(slot_free::<$slot>),*];
+    };
+}
+allocator_callbacks!(
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+    74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+);
+
 fn cached_allocator(
     original: ffi::PyMemAllocatorEx,
     domain: ffi::PyMemAllocatorDomain,
-) -> ffi::PyMemAllocatorEx {
+) -> PyResult<ffi::PyMemAllocatorEx> {
     let mut cache = ALLOCATOR_CACHE.lock();
-    let index = cache.iter().position(|wrapper| {
+    if let Some(index) = cache.iter().position(|wrapper| {
         wrapper.domain as i32 == domain as i32
             && same_allocator(&wrapper.original_allocator, &original)
-    });
-    let index = index.unwrap_or_else(|| {
-        cache.push(Box::new(MyAllocator::new(original, domain)));
-        cache.len() - 1
-    });
+    }) {
+        return Ok(cache[index].get_allocator_ex(index));
+    }
+    let index = cache.len();
+    if index == ALLOCATOR_SLOT_COUNT {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Profiler callback slots exhausted by distinct Python allocator chains",
+        ));
+    }
+    cache.push(Box::new(MyAllocator::new(original, domain)));
     let wrapper = &*cache[index];
-    let mut allocator = wrapper.get_allocator_ex();
-    allocator.ctx = wrapper as *const MyAllocator as *mut libc::c_void;
-    allocator
+    ALLOCATOR_SLOTS[index].store(
+        wrapper as *const MyAllocator as *mut MyAllocator,
+        Ordering::Release,
+    );
+    Ok(wrapper.get_allocator_ex(index))
 }
 
 fn resolve_stack_key(
@@ -854,7 +970,7 @@ mod tests {
         assert!(tracked.is_some());
 
         // Simulate the underlying realloc failing: old pointer is still live
-        handle_realloc_end(tracked, ptr, std::ptr::null_mut(), 128);
+        handle_realloc_end(tracked, ptr, std::ptr::null_mut(), 128, None);
 
         assert!(
             metadata_store::remove_metadata(ptr).is_some(),
@@ -884,7 +1000,7 @@ mod tests {
 
         TRACING.store(true, Ordering::Release);
         let tracked = handle_realloc_start(ptr);
-        handle_realloc_end(tracked, ptr, new_ptr, 128);
+        handle_realloc_end(tracked, ptr, new_ptr, 128, None);
         TRACING.store(false, Ordering::Release);
 
         let profile_data = PROFILE_DATA.lock();
@@ -906,6 +1022,15 @@ mod tests {
         }
         assert_eq!(fast_exp_rand(0), 0);
         assert_eq!(fast_exp_rand(-5), 0);
+    }
+
+    #[test]
+    fn tiny_sampling_probabilities_retain_precision() {
+        let rate = i32::MAX;
+        let probability = -(-1.0 / rate as f64).exp_m1();
+        assert_eq!(exp_interval(rate, probability * 0.5), 1);
+        assert_eq!(exp_interval(rate, probability * 1.5), 2);
+        assert_eq!(exp_interval(rate, probability * 2.5), 3);
     }
 
     #[test]

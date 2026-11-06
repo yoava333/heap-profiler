@@ -62,6 +62,14 @@ pub fn store_metadata(ptr: *mut std::ffi::c_void, metadata: AllocationMetadata) 
     shard.occupied.store(true, Ordering::Release);
 }
 
+pub fn contains_metadata(ptr: *mut std::ffi::c_void) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    let shard = shard_for(ptr);
+    shard.occupied.load(Ordering::Acquire) && shard.entries.lock().contains_key(&ThreadSafePtr(ptr))
+}
+
 pub fn remove_metadata(ptr: *mut std::ffi::c_void) -> Option<AllocationMetadata> {
     let shard = shard_for(ptr);
     if !shard.occupied.load(Ordering::Acquire) {

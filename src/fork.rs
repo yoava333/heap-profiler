@@ -75,6 +75,9 @@ fn release(in_child: bool) {
             STRING_INTERNER.reset_after_fork();
         }
     }
+    if in_child {
+        crate::allocator::reset_sampler_after_fork();
+    }
     HELD_LOCKS.with(|slot| {
         let mut guards = slot.borrow_mut();
         if in_child {
