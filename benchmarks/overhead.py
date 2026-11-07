@@ -9,6 +9,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--tracing", action="store_true")
 parser.add_argument("--repeat", type=int, default=7)
 parser.add_argument("--iterations", type=int, default=10000)
+parser.add_argument("--workload", choices=["all", "small_allocations", "medium_allocations", "compression"], default="all")
 args = parser.parse_args()
 
 
@@ -38,6 +39,8 @@ if args.tracing:
 
 results = {}
 for workload in (small_allocations, medium_allocations, compression):
+    if args.workload != "all" and workload.__name__ != args.workload:
+        continue
     workload()
     timings = []
     for _ in range(args.repeat):

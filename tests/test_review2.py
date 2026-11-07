@@ -239,3 +239,41 @@ void finish(void) {atomic_store(&stop,1);for(int i=0;i<4;i++) pthread_join(worke
         lib.finish()
         gil.restore()
     """)
+
+
+def test_fork_from_cpp_thread_local_destructor(tmp_path):
+    library = compile_library(tmp_path, r"""
+        #include <pthread.h>
+        #include <sys/wait.h>
+        #include <unistd.h>
+        #include <cstdlib>
+        static void fork_once() {
+            pid_t child = fork();
+            if (child == 0) _exit(0);
+            if (child < 0) std::abort();
+            int status;
+            if (waitpid(child, &status, 0) != child || status != 0) std::abort();
+        }
+        struct Probe { ~Probe() { fork_once(); } };
+        static thread_local Probe probe;
+        static void *worker(void *) {
+            (void)&probe;
+            fork_once();  // Initializes the old drop-managed fork TLS after Probe.
+            return nullptr;
+        }
+        extern "C" int run() {
+            pthread_t thread;
+            if (pthread_create(&thread, nullptr, worker, nullptr)) return 1;
+            return pthread_join(thread, nullptr);
+        }
+    """, cpp=True)
+    run_code(f"""
+        import ctypes
+        import heap_profiler as h
+        lib = ctypes.CDLL({str(library)!r})
+        h.start_tracing(1024, native=False)
+        assert lib.run() == 0
+        h.stop_tracing()
+        # Atfork handlers remain registered after stopping.
+        assert lib.run() == 0
+    """)

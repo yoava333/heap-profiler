@@ -25,18 +25,29 @@ impl<T> Mutex<T> {
 
     // Requiring a static borrow prevents moving a pthread mutex after use.
     pub fn lock(&'static self) -> MutexGuard<'static, T> {
-        let status = unsafe { libc::pthread_mutex_lock(self.raw.get()) };
-        assert_eq!(status, 0, "profiler mutex lock failed");
+        self.acquire();
         MutexGuard {
             mutex: self,
-            unlock: true,
             not_send: PhantomData,
         }
     }
 
+    fn acquire(&self) {
+        // SAFETY: raw storage is initialized and remains at a stable address.
+        let status = unsafe { libc::pthread_mutex_lock(self.raw.get()) };
+        assert_eq!(status, 0, "profiler mutex lock failed");
+    }
+
+    fn release(&self) {
+        // SAFETY: only an owning guard or the matching fork parent releases it.
+        let status = unsafe { libc::pthread_mutex_unlock(self.raw.get()) };
+        assert_eq!(status, 0, "profiler mutex unlock failed");
+    }
+
+    /// # Safety
     /// All profiler mutexes must be held by the forking thread, no other
-    /// thread may exist in the child, and inherited guards must be disarmed.
-    pub unsafe fn reset_after_fork(&self) {
+    /// thread may exist in the child, and no inherited guards may exist.
+    unsafe fn reset_after_fork(&self) {
         self.raw.get().write(libc::PTHREAD_MUTEX_INITIALIZER);
     }
 }
@@ -51,7 +62,6 @@ impl<T> Drop for Mutex<T> {
 
 pub struct MutexGuard<'a, T> {
     mutex: &'a Mutex<T>,
-    unlock: bool,
     not_send: PhantomData<Rc<()>>,
 }
 
@@ -68,18 +78,30 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 }
 impl<T> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        if self.unlock {
-            let status = unsafe { libc::pthread_mutex_unlock(self.mutex.raw.get()) };
-            assert_eq!(status, 0, "profiler mutex unlock failed");
-        }
+        self.mutex.release();
     }
 }
 
-pub(crate) trait ForkGuard {
-    fn disarm_after_fork(&mut self);
+/// Erase only the protected data type for the one process-owned fork inventory.
+pub(crate) trait ForkMutex: Sync {
+    /// # Safety
+    /// Pair with parent release or child reset; do not access protected data.
+    unsafe fn acquire_for_fork(&self);
+    /// # Safety
+    /// The forking parent must own this mutex from acquire_for_fork.
+    unsafe fn release_after_fork(&self);
+    /// # Safety
+    /// Only the surviving child may reset a mutex acquired before the fork.
+    unsafe fn reset_in_child(&self);
 }
-impl<T> ForkGuard for MutexGuard<'_, T> {
-    fn disarm_after_fork(&mut self) {
-        self.unlock = false;
+impl<T: Send> ForkMutex for Mutex<T> {
+    unsafe fn acquire_for_fork(&self) {
+        self.acquire();
+    }
+    unsafe fn release_after_fork(&self) {
+        self.release();
+    }
+    unsafe fn reset_in_child(&self) {
+        self.reset_after_fork();
     }
 }

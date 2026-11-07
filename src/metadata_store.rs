@@ -29,13 +29,8 @@ pub struct MetadataShard {
 }
 
 impl MetadataShard {
-    pub(crate) fn lock(
-        &'static self,
-    ) -> crate::sync::MutexGuard<'static, HashMap<ThreadSafePtr, AllocationMetadata>> {
-        self.entries.lock()
-    }
-    pub(crate) unsafe fn reset_after_fork(&self) {
-        self.entries.reset_after_fork();
+    pub(crate) fn fork_mutex(&'static self) -> &'static dyn crate::sync::ForkMutex {
+        &self.entries
     }
 }
 

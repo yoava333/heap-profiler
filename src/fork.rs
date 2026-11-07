@@ -1,30 +1,39 @@
-//! Drain transactions before fork. Parent releases normally; child replaces
-//! inherited mutex state, including waiter state from threads that disappeared.
-use std::cell::{Cell, RefCell};
+//! One process-owned lock inventory coordinates fork without destructor-managed
+//! TLS. Native thread-local destructors may fork after Rust TLS has been torn down.
+use once_cell::sync::Lazy;
+use std::cell::Cell;
 use std::sync::OnceLock;
 
-use crate::allocator::{ALLOCATOR_CACHE, GLOBAL_PATCHER, SAVED_ALLOCATORS};
+use crate::allocator::{ALLOCATOR_REGISTRY, GLOBAL_PATCHER, SAVED_ALLOCATORS};
 use crate::interner::STRING_INTERNER;
 use crate::metadata_store::METADATA_SHARDS;
 use crate::profile::{PROFILE_DATA, PROFILE_TRANSACTION};
-use crate::sync::ForkGuard;
+use crate::sync::ForkMutex;
 
 thread_local! {
     static PREVIOUS_RECURSION: Cell<bool> = const { Cell::new(false) };
-    static HELD_LOCKS: RefCell<Vec<Box<dyn ForkGuard>>> = const { RefCell::new(Vec::new()) };
 }
 static ATFORK_INIT: OnceLock<libc::c_int> = OnceLock::new();
+static FORK_MUTEXES: Lazy<Vec<&'static dyn ForkMutex>> = Lazy::new(|| {
+    let mut locks: Vec<&'static dyn ForkMutex> = vec![
+        &PROFILE_TRANSACTION,
+        &*GLOBAL_PATCHER,
+        &*SAVED_ALLOCATORS,
+        &ALLOCATOR_REGISTRY,
+        &*PROFILE_DATA,
+    ];
+    locks.extend(METADATA_SHARDS.iter().map(|shard| shard.fork_mutex()));
+    locks.push(&*STRING_INTERNER);
+    locks
+});
 
 pub fn install_atfork_handlers() -> pyo3::PyResult<()> {
-    let status = *ATFORK_INIT.get_or_init(|| unsafe {
+    let status = *ATFORK_INIT.get_or_init(|| {
         crate::stack::initialize_markers();
-        once_cell::sync::Lazy::force(&GLOBAL_PATCHER);
-        once_cell::sync::Lazy::force(&SAVED_ALLOCATORS);
-        once_cell::sync::Lazy::force(&ALLOCATOR_CACHE);
-        once_cell::sync::Lazy::force(&PROFILE_DATA);
-        once_cell::sync::Lazy::force(&METADATA_SHARDS);
-        once_cell::sync::Lazy::force(&STRING_INTERNER);
-        libc::pthread_atfork(Some(prepare), Some(parent), Some(child))
+        Lazy::force(&FORK_MUTEXES);
+        // SAFETY: all process-owned mutexes and marker strings are initialized;
+        // handlers use no drop-managed TLS or per-fork heap bookkeeping.
+        unsafe { libc::pthread_atfork(Some(prepare), Some(parent), Some(child)) }
     });
     if status != 0 {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -37,58 +46,38 @@ pub fn install_atfork_handlers() -> pyo3::PyResult<()> {
 
 extern "C" fn prepare() {
     PREVIOUS_RECURSION.with(|state| state.set(crate::recursion_guard::replace_in_malloc(true)));
-    HELD_LOCKS.with(|slot| {
-        let mut guards = slot.borrow_mut();
-        assert!(guards.is_empty());
-        guards.push(Box::new(PROFILE_TRANSACTION.lock()));
-        guards.push(Box::new(GLOBAL_PATCHER.lock()));
-        guards.push(Box::new(SAVED_ALLOCATORS.lock()));
-        guards.push(Box::new(ALLOCATOR_CACHE.lock()));
-        guards.push(Box::new(PROFILE_DATA.lock()));
-        for shard in METADATA_SHARDS.iter() {
-            guards.push(Box::new(shard.lock()));
+    for lock in FORK_MUTEXES.iter() {
+        // SAFETY: acquire the fixed inventory in its documented order before
+        // fork; parent/child handlers finish this ownership protocol.
+        unsafe {
+            lock.acquire_for_fork();
         }
-        guards.push(Box::new(STRING_INTERNER.lock()));
-    });
+    }
 }
 
 extern "C" fn parent() {
-    release(false);
-}
-extern "C" fn child() {
-    release(true);
+    for lock in FORK_MUTEXES.iter().rev() {
+        // SAFETY: prepare acquired this mutex on the same surviving parent thread.
+        unsafe {
+            lock.release_after_fork();
+        }
+    }
+    restore_recursion();
 }
 
-fn release(in_child: bool) {
-    if in_child {
-        // Only the forking thread survived. No old waiters may be woken or
-        // retained, and no inherited guard may unlock the replacement mutexes.
+extern "C" fn child() {
+    for lock in FORK_MUTEXES.iter() {
+        // SAFETY: only the child thread survived, prepare owned every mutex,
+        // and no guard exists that could unlock replacement mutex state.
         unsafe {
-            PROFILE_TRANSACTION.reset_after_fork();
-            GLOBAL_PATCHER.reset_after_fork();
-            SAVED_ALLOCATORS.reset_after_fork();
-            ALLOCATOR_CACHE.reset_after_fork();
-            PROFILE_DATA.reset_after_fork();
-            for shard in METADATA_SHARDS.iter() {
-                shard.reset_after_fork();
-            }
-            STRING_INTERNER.reset_after_fork();
+            lock.reset_in_child();
         }
     }
-    if in_child {
-        crate::allocator::reset_sampler_after_fork();
-    }
-    HELD_LOCKS.with(|slot| {
-        let mut guards = slot.borrow_mut();
-        if in_child {
-            for guard in guards.iter_mut() {
-                guard.disarm_after_fork();
-            }
-        }
-        while let Some(guard) = guards.pop() {
-            drop(guard);
-        }
-    });
+    crate::allocator::reset_sampler_after_fork();
+    restore_recursion();
+}
+
+fn restore_recursion() {
     PREVIOUS_RECURSION.with(|state| {
         crate::recursion_guard::replace_in_malloc(state.get());
     });
