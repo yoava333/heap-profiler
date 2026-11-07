@@ -1,209 +1,223 @@
 # heap-profiler
 
-A sampling memory profiler for CPython, implemented in Rust with Python bindings through PyO3. It tracks allocator events and exports pprof-compatible heap profiles.
+A sampling heap profiler for CPython, written in Rust. Track Python allocator
+requests and selected native allocations, then explore the allocation stacks
+in Go's pprof web interface.
 
-## Features
+![Go pprof Flame Graph showing estimated in-use memory by Python allocation stack](docs/images/pprof-web.png)
 
-- **Configurable Sampling**: Tune stack-capture frequency with `sample_rate`
-- **Detailed Memory Tracking**: Captures allocation and deallocation events with stack traces
-- **Python Integration**: Seamlessly integrates with Python applications
-- **Rich Profile Data**: Provides detailed memory usage statistics per stack trace
-- **pprof Compatible**: Outputs data in pprof format for visualization
+*The pprof web UI displaying a real profile from [the included demo](examples/pprof_demo.py).
+Bar widths show estimated in-use bytes. The demo retains 48 MiB of buffer payload;
+allocator overhead and sampling affect the reported estimate.*
 
-## TL;DR
+## Install
 
-```bash
-pip install heap-profiler
+Requires **GIL-enabled CPython 3.11–3.15** and a supported 64-bit platform.
+
+```sh
+python -m pip install heap-profiler
 ```
+
+The first PyPI release is being prepared. Until it is published, use the
+[source build](#build-from-source) below. Installing a wheel needs no Rust
+toolchain; building from source does.
+
+## Capture a profile
 
 ```python
-import heap_profiler
-heap_profiler.start_tracing()
+from pathlib import Path
 
-# your code here
-# ...
-
-with open("heap.pb.gz", "wb") as f:
-    f.write(heap_profiler.get_pprof_data(compress=True))
-```
-
-See [examples/pprof_server.py](examples/pprof_server.py) for a simple pprof server.
-
-## Scope and overhead
-
-The goal is pprof-compatible heap sampling from Python allocator domains and
-selected native allocation calls. Overhead depends on allocation rate, stack
-depth, sampling interval, and native coverage. The included allocation-heavy
-benchmarks can approach twice the unprofiled runtime; C-bound work is much less
-affected. Measure a representative workload before choosing the interval, and
-increase `sample_rate` when throughput matters more than sampling resolution.
-
-## Installation
-
-```bash
-pip install heap-profiler
-```
-
-## Usage
-
-```python
 import heap_profiler
 
-# Start memory profiling
 heap_profiler.start_tracing()
+try:
+    # Run your workload. Keep its objects live to inspect retained memory.
+    documents = [bytearray(1024 * 1024) for _ in range(16)]
+    profile = heap_profiler.get_pprof_data(compress=True)
+finally:
+    heap_profiler.stop_tracing()
 
-# Your code here
-# ...
-
-# Get profile data as a list of ProfileEntry objects
-profile_data = heap_profiler.get_profile_data()
-
-# Or get data in pprof format for visualization
-pprof_data = heap_profiler.get_pprof_data()
+Path("heap.pb.gz").write_bytes(profile)
 ```
 
-`get_profile_data()` returns raw sampled counts; `get_pprof_data()` returns values scaled to estimate the full heap (pprof-style).
+Capture the snapshot **before** stopping tracing. Stopping restores the original
+allocators and keeps the recorded counters, but subsequent frees are no longer
+reflected in those counters.
 
-To stop profiling or take interval snapshots:
+## Open it in pprof
 
-```python
-heap_profiler.stop_tracing()        # restore original allocators/hooks
-heap_profiler.reset_profile_data()  # clear accumulated data (interval profiling)
+Install [Go](https://go.dev/dl/), then run:
+
+```sh
+go tool pprof -http=127.0.0.1:8080 heap.pb.gz
 ```
 
-Set `HEAP_PROFILER_LOG=<filter>` (e.g. `heap_profiler=debug`) to enable the profiler's internal JSON logging to stderr.
+Open <http://127.0.0.1:8080/ui/flamegraph> or select **View → Flame Graph**
+to explore allocation stacks. The Graph view also
+requires [Graphviz](https://graphviz.org/download/) (`dot`) on PATH. The Flame
+Graph and Top views work without Graphviz.
 
-Each `ProfileEntry` contains:
+Use the **Sample** menu to choose what to inspect:
 
-- `alloc_bytes`: Total bytes allocated
-- `free_bytes`: Total bytes freed
-- `alloc_objects`: Number of allocations
-- `free_objects`: Number of deallocations
-- `stack_frames`: List of (filename, function_name, line_number) tuples representing the stack trace
+| Metric | Meaning |
+| --- | --- |
+| `inuse_space` | Estimated bytes still live at the snapshot; the default view |
+| `alloc_space` | Estimated cumulative bytes allocated during the interval |
+| `inuse_objects` | Estimated allocator requests still live |
+| `alloc_objects` | Estimated cumulative allocation requests |
 
-## How It Works
+For a terminal report:
 
-The profiler works by intercepting memory allocation functions at multiple levels:
+```sh
+go tool pprof -top -sample_index=alloc_space heap.pb.gz
+```
 
-1. Python's memory allocator interface
-2. Native malloc/free calls
-3. Explicit rescans of loaded native libraries
+To reproduce the screenshot's workload from a checkout:
 
-It uses statistical sampling with a default mean interval of 128 KiB. An allocation
-of size `s` is sampled with probability approximately `1 - exp(-s / sample_rate)`;
-large allocations are more likely to be sampled. `sample_rate=1` records every
-allocation. Stack traces contain up to 128 Python frames, with markers for
-native or detached threads. Requested sizes are reported, rather than allocator
-arena sizes or process RSS. Object counts mean allocator requests, not a census
-of live Python objects (which may be served from interpreter free lists).
+```sh
+python examples/pprof_demo.py --output heap.pb.gz
+go tool pprof -http=127.0.0.1:8080 -sample_index=inuse_space heap.pb.gz
+```
 
-The pprof export applies each allocation's own sampling weight. Changing the
-sampling rate does not retroactively rescale earlier allocations or their frees.
-Raw `ProfileEntry` counters remain unscaled.
+The demo also allocates and frees 8 MiB of temporary buffers. Compare
+`alloc_space` with `inuse_space` to see that temporary work in the profile.
+For an HTTP endpoint, see [examples/pprof_server.py](examples/pprof_server.py).
+Its Flask dependency is optional and only needed for that example.
 
-Import native extensions before starting tracing when practical. After loading
-more native code, explicitly refresh the hooks:
+## Sampling and accuracy
+
+`sample_rate` is a mean sampling interval in **bytes**, defaulting to **128 KiB**.
+A larger interval captures fewer stacks and reduces overhead; a smaller one
+provides more detail. Use `sample_rate=1` to record every allocation request
+within the profiler's interception coverage:
 
 ```python
-import heap_profiler
-heap_profiler.start_tracing()
-import my_native_extension
+heap_profiler.start_tracing(sample_rate=256 * 1024)
+```
+
+The pprof export weights each sampled allocation by its inclusion probability
+to estimate totals. Its matching free uses the same original weight, even if
+the sampling rate changes. Small profiles and individual stacks can have
+substantial sampling noise; more observations improve precision.
+
+Reported bytes are **requested allocation sizes**, rather than process RSS,
+allocator arenas, or usable block sizes. Object counts represent allocator
+requests, which can differ from the number of Python objects because of
+interpreter caches and free lists. Successful zero-byte requests contribute
+to object counts while contributing zero requested bytes.
+
+`get_profile_data()` exposes **raw sampled counters**, not estimated totals:
+
+```python
+for entry in heap_profiler.get_profile_data():
+    sampled_live_bytes = entry.alloc_bytes - entry.free_bytes
+    print(sampled_live_bytes, entry.stack_frames)
+```
+
+Each entry has `alloc_bytes`, `free_bytes`, `alloc_objects`, `free_objects`, and
+`stack_frames`, whose elements are `(filename, function_name, line_number)`.
+Use the pprof metrics when you need estimates of the full intercepted workload.
+
+## Intervals and configuration
+
+```python
+heap_profiler.reset_profile_data()  # Start a fresh accounting interval.
+heap_profiler.start_tracing(sample_rate=64 * 1024)  # Change the rate while running.
+heap_profiler.stop_tracing()        # Restore allocator tables and native hooks.
+```
+
+Reset forgets allocations sampled before the reset, including those still live;
+their later frees do not appear in the new interval. To profile a new workload,
+reset before running it. Frees while tracing is stopped cannot update old
+profiles. On Unix, forked children inherit the profile; reset in the child when
+you want child-only measurements.
+
+For Python allocator domains without native library interception:
+
+```python
+heap_profiler.start_tracing(native=False)
+```
+
+Stop tracing before changing the `native` setting. Import native extensions
+before starting tracing when possible. After loading another native library,
+refresh its hooks:
+
+```python
+import lzma  # Load a native standard-library extension.
 heap_profiler.refresh_native_hooks()
 ```
 
-The profiler leaves `dlopen` unchanged, preserving caller-relative library search
-paths. Repeating `start_tracing()` also refreshes hooks. Unresolved lazy symbols,
-custom allocator bindings, direct `dlsym` function pointers, and native allocation
-APIs other than malloc/calloc/realloc/free/posix_memalign/aligned_alloc are outside
-this interception coverage. Python allocator hooks work independently of native
-symbol interception.
+`get_sample_rate()` reports the current interval in bytes. Repeated
+`start_tracing()` calls also refresh native hooks. For diagnostics,
+set `HEAP_PROFILER_LOG=heap_profiler=debug` to log to stderr.
 
-Supported platforms are 64-bit Linux with glibc and macOS, on x86_64 and ARM64.
-On macOS, native interception skips the dyld shared cache and authenticated
-pointer sections; chained fixups are not rewritten. Avoid concurrent native
-library unloading while starting, stopping, or refreshing hooks on macOS.
-Use `start_tracing(native=False)` to track Python allocator domains without
-patching native libraries. Stop before changing the `native` option.
-Free-threaded CPython builds and importing this module in subinterpreters are
-explicitly unsupported. Sampling never attaches a thread or acquires a GIL.
+## Platforms and coverage
 
-`reset_profile_data()` begins a new interval: allocations from earlier intervals
-are forgotten, including live allocations whose frees occur later. Stopping
-keeps historical counters but discards pointer metadata; frees while stopped or
-after restarting cannot update the previous session's in-use estimates. Reset
-before restarting when you need a fresh interval. Forked children inherit the
-profile; reset in the child when you want child-only measurements.
+| Platform | Architectures | Native interception |
+| --- | --- | --- |
+| Linux with glibc | x86_64, ARM64 | Eligible ELF allocator imports |
+| macOS | x86_64, ARM64 | Eligible Mach-O allocator bindings |
+| Windows (experimental port) | x86_64 | Not included in the main branch yet |
 
-Profile history grows with the number of distinct stacks and sampled live
-pointers. Reset periodically to release accumulated history and interned strings.
-Allocator callback generations are retained for safety and reused across restarts.
-There are 96 slots for distinct domain/allocator-table combinations; repeated
-starts with the same allocator set reuse their slots. Exhausting the slots raises
-`RuntimeError` before installing new Python hooks.
+Python allocator hooks cover the RAW, MEM, and OBJ domains. Native coverage
+includes eligible `malloc`, `calloc`, `realloc`, and `free` calls, plus
+`posix_memalign` and `aligned_alloc` where available on Unix. Custom allocator
+bindings, direct function pointers obtained through `dlsym`, unresolved lazy
+bindings, and memory obtained through APIs such as `mmap` are outside that
+native coverage. Python hooks work independently of native interception.
 
-## Development
+On macOS, native hooks skip the dyld shared cache, authenticated pointer
+sections, and chained fixups. Avoid concurrent native library unloading while
+starting, stopping, or refreshing hooks. Library loading APIs are not replaced;
+refresh explicitly after loading extensions.
 
-### Prerequisites
+The experimental Windows port has been validated with MSVC on CPython 3.13 and
+3.15. It is being developed separately from the Unix release.
 
-- Rust toolchain (latest stable)
-- GIL-enabled CPython 3.11–3.15
-- Development packages for Python
-- Cargo and maturin for building
+Free-threaded CPython and subinterpreters are unsupported. Stacks contain up to
+128 Python frames; detached and native threads have explicit marker frames.
+Sampling does not attach a Python thread or acquire the GIL from native callbacks.
 
-### Building from Source
+## Overhead
 
-1. Clone the repository:
+Overhead depends on allocation frequency, stack depth, sampling interval, and
+native coverage. The included allocation-heavy benchmarks measured roughly
+1.4×–2.1× total runtime on tested ARM64 Linux/macOS systems at the default
+interval. Those numbers are workload-specific; measure your application and
+increase the interval when throughput matters more than sampling resolution.
+See [the benchmark results](docs/overhead-profiling.md) and
+[benchmarks/overhead.py](benchmarks/overhead.py).
 
-```bash
-# install maturin
-uv tool install maturin
+Profiler memory grows with distinct allocation stacks and sampled live pointers.
+Reset periodically to release accumulated history. Immutable Python allocator
+callback generations are retained for safety and reused across restarts; there
+are 96 slots for distinct domain/allocator-table combinations.
 
-# install rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+## Build from source
 
-# clone the repository
+Install stable Rust, uv, and Python development headers, then:
+
+```sh
 git clone https://github.com/yoava333/heap-profiler.git
 cd heap-profiler
-```
-
-2. For development installation:
-
-```bash
 uv sync --locked
 ```
 
-3. For testing:
+Run checks with:
 
-```bash
-cargo test --locked
+```sh
+cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-uv run pytest tests/
+cargo test --locked
+uv run pytest -q tests/
 ```
 
-### Project Structure
+Windows users should use the experimental port rather than building this Unix
+release branch.
 
-- `src/lib.rs`: Main library entry point and Python module definition
-- `src/allocator.rs`: Core memory tracking implementation
-- `src/profile.rs`: Profile data collection and management
-- `src/stack.rs`: Stack trace capture and processing
-- `src/platform/`: Platform-specific memory interception code
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+Release maintainers: see [the PyPI publishing setup](docs/publishing.md).
 
 ## License
 
-MIT — see [LICENSE.txt](LICENSE.txt).
-
-## Acknowledgments
-
-This project uses:
-
-- [PyO3](https://github.com/PyO3/pyo3) for Rust-Python bindings
-- [pprof](https://github.com/google/pprof) format for profile data visualization
-
-See [the audit report](docs/deep-review.md) for findings, CPython source references, and validation results.
-
-The [second review](docs/second-review.md) records additional fork, RAW allocator,
-and thread-teardown findings, fixes, and validation.
+[MIT](LICENSE.txt). Python bindings use [PyO3](https://pyo3.rs/); profile exports
+use the [pprof format](https://github.com/google/pprof).
