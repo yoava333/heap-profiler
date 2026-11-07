@@ -1,29 +1,25 @@
+use crate::sync::Mutex;
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
-pub(crate) static STRING_INTERNER: Lazy<Mutex<HashMap<String, Arc<String>>>> =
+pub(crate) static STRING_INTERNER: Lazy<Mutex<HashMap<String, Weak<str>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// Interns a string and returns a `'static` reference to the single shared copy.
-///
-/// SAFETY invariant behind the transmute: entries are NEVER removed from
-/// STRING_INTERNER, so the `Arc<String>`'s heap buffer lives for the rest of
-/// the process. The Arc indirection keeps that buffer address stable across
-/// map rehashes. If eviction is ever added, this transmute becomes a
-/// use-after-free and must be redesigned first.
-pub fn intern(s: &str) -> Cow<'static, str> {
+/// Frames own their strings. Weak entries share live strings without forcing
+/// every filename seen by a long-running profiler to live forever.
+pub fn intern(s: &str) -> Arc<str> {
     let mut interner = STRING_INTERNER.lock();
-    if let Some(interned) = interner.get(s) {
-        let static_str: &'static str = unsafe { std::mem::transmute(interned.as_str()) };
-        return Cow::Borrowed(static_str);
+    if let Some(interned) = interner.get(s).and_then(Weak::upgrade) {
+        return interned;
     }
-    let owned = Arc::new(s.to_string());
-    let static_str: &'static str = unsafe { std::mem::transmute(owned.as_str()) };
-    interner.insert(s.to_string(), owned);
-    Cow::Borrowed(static_str)
+    // Amortize pruning of dead keys; reset also clears this index outright.
+    if interner.len() >= 1024 && interner.len().is_multiple_of(1024) {
+        interner.retain(|_, value| value.strong_count() != 0);
+    }
+    let owned: Arc<str> = Arc::from(s);
+    interner.insert(s.to_owned(), Arc::downgrade(&owned));
+    owned
 }
 
 #[cfg(test)]
@@ -31,18 +27,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn intern_always_returns_borrowed_and_stable() {
+    fn intern_shares_live_strings_without_retaining_them() {
         let a = intern("test_intern_unique_string_xyz");
         let b = intern("test_intern_unique_string_xyz");
-        assert!(
-            matches!(a, Cow::Borrowed(_)),
-            "first intern must be Borrowed"
-        );
-        assert!(matches!(b, Cow::Borrowed(_)));
-        assert_eq!(
-            a.as_ptr(),
-            b.as_ptr(),
-            "same string must intern to same address"
-        );
+        assert!(Arc::ptr_eq(&a, &b));
+        let weak = Arc::downgrade(&a);
+        drop(a);
+        drop(b);
+        assert!(weak.upgrade().is_none());
     }
 }

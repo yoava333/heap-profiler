@@ -1,6 +1,7 @@
+use crate::sync::Mutex;
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // A wrapper around raw pointers that implements Send and Sync
 #[derive(Clone, Copy, Hash, Eq, PartialEq)]
@@ -14,38 +15,74 @@ unsafe impl Sync for ThreadSafePtr {}
 pub struct AllocationMetadata {
     pub stack_hash: u64,
     pub requested_size: usize,
+    pub generation: u64,
+    pub sample_rate: i32,
 }
 
 /// Number of independent shards. Every free in the process takes one of these
 /// locks, so a single global mutex would serialize the entire free path.
 pub const SHARD_COUNT: usize = 64;
 
-pub static METADATA_SHARDS: Lazy<Vec<Mutex<HashMap<ThreadSafePtr, AllocationMetadata>>>> =
-    Lazy::new(|| {
-        (0..SHARD_COUNT)
-            .map(|_| Mutex::new(HashMap::new()))
-            .collect()
-    });
+pub struct MetadataShard {
+    entries: Mutex<HashMap<ThreadSafePtr, AllocationMetadata>>,
+    occupied: AtomicBool,
+}
+
+impl MetadataShard {
+    pub(crate) fn fork_mutex(&'static self) -> &'static dyn crate::sync::ForkMutex {
+        &self.entries
+    }
+}
+
+pub static METADATA_SHARDS: Lazy<Vec<MetadataShard>> = Lazy::new(|| {
+    (0..SHARD_COUNT)
+        .map(|_| MetadataShard {
+            entries: Mutex::new(HashMap::new()),
+            occupied: AtomicBool::new(false),
+        })
+        .collect()
+});
 
 #[inline]
-fn shard_for(
-    ptr: *mut std::ffi::c_void,
-) -> &'static Mutex<HashMap<ThreadSafePtr, AllocationMetadata>> {
-    // Low 4 bits are alignment zeros; use the next bits to spread pointers
+fn shard_for(ptr: *mut std::ffi::c_void) -> &'static MetadataShard {
     &METADATA_SHARDS[(ptr as usize >> 4) % SHARD_COUNT]
 }
 
 pub fn store_metadata(ptr: *mut std::ffi::c_void, metadata: AllocationMetadata) {
-    shard_for(ptr).lock().insert(ThreadSafePtr(ptr), metadata);
+    let shard = shard_for(ptr);
+    let mut entries = shard.entries.lock();
+    entries.insert(ThreadSafePtr(ptr), metadata);
+    // Publish before returning the allocated pointer to its owner. No free
+    // of a tracked live pointer may observe an empty shard after publication.
+    shard.occupied.store(true, Ordering::Release);
+}
+
+pub fn contains_metadata(ptr: *mut std::ffi::c_void) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    let shard = shard_for(ptr);
+    shard.occupied.load(Ordering::Acquire) && shard.entries.lock().contains_key(&ThreadSafePtr(ptr))
 }
 
 pub fn remove_metadata(ptr: *mut std::ffi::c_void) -> Option<AllocationMetadata> {
-    shard_for(ptr).lock().remove(&ThreadSafePtr(ptr))
+    let shard = shard_for(ptr);
+    if !shard.occupied.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut entries = shard.entries.lock();
+    let metadata = entries.remove(&ThreadSafePtr(ptr));
+    if entries.is_empty() {
+        shard.occupied.store(false, Ordering::Release);
+    }
+    metadata
 }
 
 pub fn clear() {
     for shard in METADATA_SHARDS.iter() {
-        shard.lock().clear();
+        let mut entries = shard.entries.lock();
+        entries.clear();
+        shard.occupied.store(false, Ordering::Release);
     }
 }
 
@@ -58,7 +95,7 @@ mod tests {
         let _serial = crate::GLOBAL_TEST_LOCK.lock();
         // Pointers chosen to land in different shards
         let ptrs: Vec<*mut std::ffi::c_void> = (0..256)
-            .map(|i| ((i * 16 + 0x1000_0000) as *mut std::ffi::c_void))
+            .map(|i| (i * 16 + 0x1000_0000) as *mut std::ffi::c_void)
             .collect();
         for (i, &ptr) in ptrs.iter().enumerate() {
             store_metadata(
@@ -66,6 +103,8 @@ mod tests {
                 AllocationMetadata {
                     stack_hash: i as u64,
                     requested_size: i,
+                    generation: 0,
+                    sample_rate: 1,
                 },
             );
         }
@@ -89,6 +128,8 @@ mod tests {
             AllocationMetadata {
                 stack_hash: 7,
                 requested_size: 7,
+                generation: 0,
+                sample_rate: 1,
             },
         );
         clear();

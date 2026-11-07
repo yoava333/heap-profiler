@@ -16,7 +16,7 @@ def setup_allocator() -> None:
 
 
 def np_alloc() -> None:
-    np.ones((1024, 1024, 100))
+    np.ones((1024, 1024, 8))
 
 
 def allocate_and_free() -> None:

@@ -1,9 +1,14 @@
 [project]
 name = "heap-profiler"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.16"
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
 ]
 dynamic = ["version"]
 dependencies = []
@@ -16,24 +21,22 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "heap_profiler"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "numpy>=2.3.2",
     "protobuf>=5.29.3",
     "psutil>=6.1.1",
     "pyperformance>=1.11.0",
-    "pytest>=8.3.4",
-    "pytest-forked>=1.6.0",
+    "pytest>=8.3.4,<9",
+    "pytest-forked>=1.6.0,<1.7",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.14",
     "mypy>=1.8.0",
     "types-psutil>=6.1.0.20241221",
     "types-protobuf>=5.29.1.20241207",
     "flask>=3.1.0",
     "pytest-repeat>=0.9.3",
-    "malloc-stresser",
 ]
-
-[tool.uv.sources]
-malloc-stresser = { git = "https://github.com/yoava333/malloc-stresser.git" }
 
 [tool.mypy]
 python_version = "3.11"
@@ -77,3 +80,5 @@ ignore = [
     "S101",  # use of assert
     "F841",  # local variable is assigned but never used
 ]
+[tool.pytest.ini_options]
+timeout = 60

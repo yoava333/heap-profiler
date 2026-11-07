@@ -3,7 +3,7 @@ use std::ffi::CStr;
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use tracing::{debug, error};
 
 use super::Patcher;
@@ -16,11 +16,11 @@ const DT_REL: i64 = 17;
 const DT_RELA: i64 = 7;
 const DT_RELSZ: i64 = 18;
 const DT_RELASZ: i64 = 8;
-const PROT_READ: i32 = 0x1;
 const PROT_WRITE: i32 = 0x2;
 const DT_SYMTAB: i64 = 6;
 const DT_STRTAB: i64 = 5;
 const DT_SYMENT: i64 = 11;
+const DT_STRSZ: i64 = 10;
 const DT_JMPREL: i64 = 23;
 const DT_PLTRELSZ: i64 = 2;
 
@@ -82,7 +82,7 @@ pub struct Elf64_Sym {
 struct SymbolTable {
     symtab: *const Elf64_Sym,
     strtab: *const u8,
-    sym_count: usize,
+    str_size: usize,
 }
 
 impl SymbolTable {
@@ -90,6 +90,7 @@ impl SymbolTable {
         let mut symtab = ptr::null();
         let mut strtab = ptr::null();
         let mut syment: usize = 0;
+        let mut str_size = 0;
 
         let mut cur = dyn_info;
         while (*cur).d_tag != DT_NULL {
@@ -97,31 +98,34 @@ impl SymbolTable {
                 tag if tag == DT_SYMTAB => symtab = (*cur).d_un.d_ptr as *const Elf64_Sym,
                 tag if tag == DT_STRTAB => strtab = (*cur).d_un.d_ptr as *const u8,
                 tag if tag == DT_SYMENT => syment = (*cur).d_un.d_val as usize,
+                tag if tag == DT_STRSZ => str_size = (*cur).d_un.d_val as usize,
                 _ => {}
             }
             cur = cur.add(1);
         }
 
-        if symtab.is_null() || strtab.is_null() || syment == 0 {
+        if symtab.is_null()
+            || strtab.is_null()
+            || syment != mem::size_of::<Elf64_Sym>()
+            || str_size == 0
+        {
             return None;
         }
-
-        // Calculate symbol count (approximate)
-        let sym_count = ((strtab as usize - symtab as usize) / syment) as usize;
 
         Some(SymbolTable {
             symtab,
             strtab,
-            sym_count,
+            str_size,
         })
     }
 
     unsafe fn get_symbol_name(&self, st_name: u32) -> Option<&str> {
-        if st_name == 0 {
+        if st_name == 0 || st_name as usize >= self.str_size {
             return None;
         }
         let name_ptr = self.strtab.add(st_name as usize) as *const c_char;
-        let c_str = CStr::from_ptr(name_ptr);
+        let bytes = slice::from_raw_parts(name_ptr.cast(), self.str_size - st_name as usize);
+        let c_str = CStr::from_bytes_until_nul(bytes).ok()?;
         c_str.to_str().ok()
     }
 }
@@ -137,6 +141,7 @@ struct ElfPatcherContext<'a> {
     restore_original: bool,
     self_so_name: &'a str,
     hooks: &'a [Hook],
+    mappings: &'a [MemoryRegion],
 }
 
 /// A global to ensure we don't run hooking simultaneously in multiple threads.
@@ -167,6 +172,7 @@ impl Patcher for LinuxPatcher {
             restore_original: false,
             self_so_name: &self.self_so_name,
             hooks: &self.hooks,
+            mappings: &read_mappings(),
         };
 
         debug!("Starting to apply hooks...");
@@ -194,6 +200,7 @@ impl Patcher for LinuxPatcher {
             restore_original: true,
             self_so_name: &self.self_so_name,
             hooks: &self.hooks,
+            mappings: &read_mappings(),
         };
 
         debug!("Starting to restore original functions...");
@@ -249,12 +256,13 @@ unsafe extern "C" fn phdrs_callback(
     let phdr_slice = slice::from_raw_parts(info_ref.dlpi_phdr, info_ref.dlpi_phnum as usize);
     for phdr in phdr_slice {
         if phdr.p_type == PT_DYNAMIC {
-            let dyn_ptr = (info_ref.dlpi_addr as u64 + phdr.p_vaddr) as *const Elf64_Dyn;
+            let dyn_ptr = (info_ref.dlpi_addr + phdr.p_vaddr) as *const Elf64_Dyn;
             patch_symbols(
                 dyn_ptr,
-                info_ref.dlpi_addr as u64,
+                info_ref.dlpi_addr,
                 context.restore_original,
                 context.hooks,
+                context.mappings,
             );
         }
     }
@@ -267,6 +275,7 @@ unsafe fn patch_symbols(
     base: Elf64_Addr,
     restore_original: bool,
     hooks: &[Hook],
+    mappings: &[MemoryRegion],
 ) {
     if dyn_info_struct.is_null() {
         debug!("Dynamic info struct is null");
@@ -283,11 +292,23 @@ unsafe fn patch_symbols(
     match get_jump_table_type(dyn_info_struct) {
         val if val == DT_REL => {
             debug!("Found PLT relocation type: REL");
-            overwrite_plt_table::<Elf64_Rel>(dyn_info_struct, base, restore_original, hooks)
+            overwrite_plt_table::<Elf64_Rel>(
+                dyn_info_struct,
+                base,
+                restore_original,
+                hooks,
+                mappings,
+            )
         }
         val if val == DT_RELA => {
             debug!("Found PLT relocation type: RELA");
-            overwrite_plt_table::<Elf64_Rela>(dyn_info_struct, base, restore_original, hooks)
+            overwrite_plt_table::<Elf64_Rela>(
+                dyn_info_struct,
+                base,
+                restore_original,
+                hooks,
+                mappings,
+            )
         }
         val => {
             debug!("Unknown PLT relocation type: {}", val);
@@ -295,8 +316,8 @@ unsafe fn patch_symbols(
     }
 
     // Then try regular relocations
-    overwrite_elf_table::<Elf64_Rel>(dyn_info_struct, base, restore_original, hooks);
-    overwrite_elf_table::<Elf64_Rela>(dyn_info_struct, base, restore_original, hooks);
+    overwrite_elf_table::<Elf64_Rel>(dyn_info_struct, base, restore_original, hooks, mappings);
+    overwrite_elf_table::<Elf64_Rela>(dyn_info_struct, base, restore_original, hooks, mappings);
 }
 
 unsafe fn get_jump_table_type(dyn_info: *const Elf64_Dyn) -> i64 {
@@ -403,6 +424,7 @@ unsafe fn overwrite_elf_table<T>(
     base_addr: Elf64_Addr,
     restore_original: bool,
     hooks: &[Hook],
+    mappings: &[MemoryRegion],
 ) where
     T: RelocationEntry,
 {
@@ -421,11 +443,8 @@ unsafe fn overwrite_elf_table<T>(
             if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
                 continue;
             }
-            let symbol_addr = base_addr + reloc.offset() as u64;
+            let symbol_addr = base_addr + reloc.offset();
             let symbol_idx = reloc.symbol_index();
-            if symbol_table.sym_count > 0 && symbol_idx as usize >= symbol_table.sym_count {
-                continue;
-            }
 
             // Get symbol from the symbol table
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
@@ -442,7 +461,14 @@ unsafe fn overwrite_elf_table<T>(
                         } else {
                             hook.intercept_fn
                         };
-                        patch_symbol(symbol_name, symbol_addr as *mut c_void, target_fn);
+                        patch_symbol(
+                            symbol_name,
+                            symbol_addr as *mut c_void,
+                            target_fn,
+                            hook,
+                            restore_original,
+                            mappings,
+                        );
                     }
                 }
             }
@@ -452,28 +478,92 @@ unsafe fn overwrite_elf_table<T>(
     }
 }
 
-unsafe fn patch_symbol(symbol_name: &str, symbol_addr: *mut c_void, new_fn: *mut c_void) {
-    debug!(
-        "Attempting to patch symbol '{}' at {:p} with new function at {:p}",
-        symbol_name, symbol_addr, new_fn
-    );
-
-    if unprotect_page(symbol_addr) < 0 {
-        error!("Could not unprotect page for symbol '{}'", symbol_name);
-        return;
-    }
-
-    let typed_ptr = symbol_addr as *mut *mut c_void;
-    ptr::write_volatile(typed_ptr, new_fn);
-    debug!("Successfully patched symbol '{}'", symbol_name);
+#[derive(Debug)]
+struct MemoryRegion {
+    start: usize,
+    end: usize,
+    protection: i32,
 }
 
-unsafe fn unprotect_page(addr: *mut c_void) -> c_int {
-    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-    let page_mask = !(page_size - 1);
-    let page = (addr as usize & page_mask) as *mut c_void;
+fn read_mappings() -> Vec<MemoryRegion> {
+    // A snapshot avoids doing file I/O for every relocation. If procfs is
+    // unavailable, skip native patching rather than weaken unknown protections.
+    std::fs::read_to_string("/proc/self/maps")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (start, end) = fields.next()?.split_once('-')?;
+            let permissions = fields.next()?.as_bytes();
+            if permissions.len() < 3 {
+                return None;
+            }
+            let mut protection = 0;
+            if permissions[0] == b'r' {
+                protection |= libc::PROT_READ;
+            }
+            if permissions[1] == b'w' {
+                protection |= libc::PROT_WRITE;
+            }
+            if permissions[2] == b'x' {
+                protection |= libc::PROT_EXEC;
+            }
+            Some(MemoryRegion {
+                start: usize::from_str_radix(start, 16).ok()?,
+                end: usize::from_str_radix(end, 16).ok()?,
+                protection,
+            })
+        })
+        .collect()
+}
 
-    mprotect(page, page_size, PROT_READ | PROT_WRITE)
+unsafe fn patch_symbol(
+    _symbol_name: &str,
+    symbol_addr: *mut c_void,
+    new_fn: *mut c_void,
+    hook: &Hook,
+    restore_original: bool,
+    mappings: &[MemoryRegion],
+) {
+    let address = symbol_addr as usize;
+    if !address.is_multiple_of(mem::align_of::<AtomicPtr<c_void>>()) {
+        return;
+    }
+    let slot = &*symbol_addr.cast::<AtomicPtr<c_void>>();
+    let current = slot.load(Ordering::Acquire);
+    debug!(symbol = hook.symbol_name, ?current, original = ?hook.original_fn, ?new_fn, "Inspecting native binding");
+    if current == new_fn || (restore_original && current != hook.intercept_fn) {
+        return;
+    }
+    // Do not replace an allocator with a different implementation. Calling
+    // our global original for a custom allocator would corrupt its heap.
+    if !restore_original && current != hook.original_fn {
+        return;
+    }
+    let Some(region) = mappings
+        .iter()
+        .find(|m| address >= m.start && address + mem::size_of::<usize>() <= m.end)
+    else {
+        return;
+    };
+    if region.protection & libc::PROT_EXEC != 0 {
+        return;
+    }
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+    if page_size <= 0 {
+        return;
+    }
+    let page_size = page_size as usize;
+    let page = (address & !(page_size - 1)) as *mut c_void;
+    let writable = region.protection & PROT_WRITE != 0;
+    if !writable && mprotect(page, page_size, region.protection | PROT_WRITE) != 0 {
+        return;
+    }
+    // Aligned atomic replacement avoids a Rust data race with other hookers.
+    let _ = slot.compare_exchange(current, new_fn, Ordering::AcqRel, Ordering::Acquire);
+    if !writable && mprotect(page, page_size, region.protection) != 0 {
+        error!("Could not restore original GOT page protection");
+    }
 }
 
 unsafe fn overwrite_plt_table<T>(
@@ -481,6 +571,7 @@ unsafe fn overwrite_plt_table<T>(
     base_addr: Elf64_Addr,
     restore_original: bool,
     hooks: &[Hook],
+    mappings: &[MemoryRegion],
 ) where
     T: RelocationEntry,
 {
@@ -514,11 +605,8 @@ unsafe fn overwrite_plt_table<T>(
             if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
                 continue;
             }
-            let symbol_addr = base_addr + reloc.offset() as u64;
+            let symbol_addr = base_addr + reloc.offset();
             let symbol_idx = reloc.symbol_index();
-            if symbol_table.sym_count > 0 && symbol_idx as usize >= symbol_table.sym_count {
-                continue;
-            }
 
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
             if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {
@@ -534,7 +622,14 @@ unsafe fn overwrite_plt_table<T>(
                         } else {
                             hook.intercept_fn
                         };
-                        patch_symbol(symbol_name, symbol_addr as *mut c_void, target_fn);
+                        patch_symbol(
+                            symbol_name,
+                            symbol_addr as *mut c_void,
+                            target_fn,
+                            hook,
+                            restore_original,
+                            mappings,
+                        );
                     }
                 }
             }

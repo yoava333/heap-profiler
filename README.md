@@ -1,10 +1,10 @@
 # heap-profiler
 
-A high-performance Python memory profiler that helps you understand memory usage patterns in your Python applications. This profiler uses Rust for low-level memory tracking and provides Python bindings through PyO3.
+A sampling memory profiler for CPython, implemented in Rust with Python bindings through PyO3. It tracks allocator events and exports pprof-compatible heap profiles.
 
 ## Features
 
-- **Low Overhead**: Uses statistical sampling for minimal performance impact
+- **Configurable Sampling**: Tune stack-capture frequency with `sample_rate`
 - **Detailed Memory Tracking**: Captures allocation and deallocation events with stack traces
 - **Python Integration**: Seamlessly integrates with Python applications
 - **Rich Profile Data**: Provides detailed memory usage statistics per stack trace
@@ -29,27 +29,14 @@ with open("heap.pb.gz", "wb") as f:
 
 See [examples/pprof_server.py](examples/pprof_server.py) for a simple pprof server.
 
-## Why another memory profiler?
+## Scope and overhead
 
-Our inspriation was the pprof module from golang, which provides low overhead production memory tracing.
-There are a few projects that provide memory tracing for python, but they didn't fit our needs.
-
-Not suiteable for production (performance overhead):
-
-- memory_profiler
-- tracemalloc
-- memray
-- guppy3
-- filprofiler
-- pympler
-
-Not maintained:
-
-- mprofile
-
-Hard to use:
-
-- scalene
+The goal is pprof-compatible heap sampling from Python allocator domains and
+selected native allocation calls. Overhead depends on allocation rate, stack
+depth, sampling interval, and native coverage. The included allocation-heavy
+benchmarks can approach twice the unprofiled runtime; C-bound work is much less
+affected. Measure a representative workload before choosing the interval, and
+increase `sample_rate` when throughput matters more than sampling resolution.
 
 ## Installation
 
@@ -100,18 +87,66 @@ The profiler works by intercepting memory allocation functions at multiple level
 
 1. Python's memory allocator interface
 2. Native malloc/free calls
-3. Dynamic library loading (dlopen)
+3. Explicit rescans of loaded native libraries
 
-It uses statistical sampling with a default rate of 128 KiB: any allocation at least as large as the remaining sampling budget is recorded, so large allocations are always captured. Stack traces are captured for each sampled allocation to provide context about where memory is being used.
+It uses statistical sampling with a default mean interval of 128 KiB. An allocation
+of size `s` is sampled with probability approximately `1 - exp(-s / sample_rate)`;
+large allocations are more likely to be sampled. `sample_rate=1` records every
+allocation. Stack traces contain up to 128 Python frames, with markers for
+native or detached threads. Requested sizes are reported, rather than allocator
+arena sizes or process RSS. Object counts mean allocator requests, not a census
+of live Python objects (which may be served from interpreter free lists).
 
-On macOS, native interception covers dylibs outside the dyld shared cache only (system libraries use chained fixups, which this patcher does not rewrite); Python-level allocations are always tracked on all platforms.
+The pprof export applies each allocation's own sampling weight. Changing the
+sampling rate does not retroactively rescale earlier allocations or their frees.
+Raw `ProfileEntry` counters remain unscaled.
+
+Import native extensions before starting tracing when practical. After loading
+more native code, explicitly refresh the hooks:
+
+```python
+import heap_profiler
+heap_profiler.start_tracing()
+import my_native_extension
+heap_profiler.refresh_native_hooks()
+```
+
+The profiler leaves `dlopen` unchanged, preserving caller-relative library search
+paths. Repeating `start_tracing()` also refreshes hooks. Unresolved lazy symbols,
+custom allocator bindings, direct `dlsym` function pointers, and native allocation
+APIs other than malloc/calloc/realloc/free/posix_memalign/aligned_alloc are outside
+this interception coverage. Python allocator hooks work independently of native
+symbol interception.
+
+Supported platforms are 64-bit Linux with glibc and macOS, on x86_64 and ARM64.
+On macOS, native interception skips the dyld shared cache and authenticated
+pointer sections; chained fixups are not rewritten. Avoid concurrent native
+library unloading while starting, stopping, or refreshing hooks on macOS.
+Use `start_tracing(native=False)` to track Python allocator domains without
+patching native libraries. Stop before changing the `native` option.
+Free-threaded CPython builds and importing this module in subinterpreters are
+explicitly unsupported. Sampling never attaches a thread or acquires a GIL.
+
+`reset_profile_data()` begins a new interval: allocations from earlier intervals
+are forgotten, including live allocations whose frees occur later. Stopping
+keeps historical counters but discards pointer metadata; frees while stopped or
+after restarting cannot update the previous session's in-use estimates. Reset
+before restarting when you need a fresh interval. Forked children inherit the
+profile; reset in the child when you want child-only measurements.
+
+Profile history grows with the number of distinct stacks and sampled live
+pointers. Reset periodically to release accumulated history and interned strings.
+Allocator callback generations are retained for safety and reused across restarts.
+There are 96 slots for distinct domain/allocator-table combinations; repeated
+starts with the same allocator set reuse their slots. Exhausting the slots raises
+`RuntimeError` before installing new Python hooks.
 
 ## Development
 
 ### Prerequisites
 
 - Rust toolchain (latest stable)
-- Python 3.11+
+- GIL-enabled CPython 3.11–3.15
 - Development packages for Python
 - Cargo and maturin for building
 
@@ -134,13 +169,14 @@ cd heap-profiler
 2. For development installation:
 
 ```bash
-maturin develop --uv
+uv sync --locked
 ```
 
 3. For testing:
 
 ```bash
-cargo test
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 uv run pytest tests/
 ```
 
@@ -166,3 +202,8 @@ This project uses:
 
 - [PyO3](https://github.com/PyO3/pyo3) for Rust-Python bindings
 - [pprof](https://github.com/google/pprof) format for profile data visualization
+
+See [the audit report](docs/deep-review.md) for findings, CPython source references, and validation results.
+
+The [second review](docs/second-review.md) records additional fork, RAW allocator,
+and thread-teardown findings, fixes, and validation.

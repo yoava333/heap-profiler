@@ -1,41 +1,30 @@
 use crate::proto::*;
 use crate::stack::StackFrame;
+use crate::sync::Mutex;
 use crate::ProfileEntry;
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
-use parking_lot::Mutex;
 use prost::Message;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyList};
 use std::io::prelude::*;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 // Constants for sampling
 pub const DEFAULT_SAMPLE_RATE: i32 = 128 * 1024; // 128 KiB - reduced sampling frequency for better performance
 
-/// Scales heap sample data to account for sampling probability
-///
-/// # Arguments
-/// * `count` - The number of objects
-/// * `size` - The total size in bytes
-/// * `rate` - The sampling rate
-///
-/// Returns scaled (count, size) tuple
-fn scale_heap_sample(count: i64, size: i64, rate: i64) -> (i64, i64) {
-    if count == 0 || size == 0 {
-        return (0, 0);
-    }
-
+/// Inverse inclusion probability, computed per allocation rather than from
+/// an average size. The same weight follows the allocation through its free.
+pub(crate) fn sample_weight(size: usize, rate: i32) -> (f64, f64) {
     if rate <= 1 {
-        // if rate==1 all samples were collected so no adjustment is needed.
-        // if rate<1 treat as unknown and skip scaling.
-        return (count, size);
+        return (1.0, size as f64);
     }
-
-    let avg_size = size as f64 / count as f64;
-    let scale = 1.0 / (1.0 - (-avg_size / rate as f64).exp());
-
-    ((count as f64 * scale) as i64, (size as f64 * scale) as i64)
+    let probability = -(-(size.max(1) as f64) / rate as f64).exp_m1();
+    (1.0 / probability, size as f64 / probability)
 }
+
+pub(crate) static PROFILE_TRANSACTION: Mutex<()> = Mutex::new(());
+pub(crate) static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub static PROFILE_DATA: Lazy<Mutex<HashMap<u64, MemProfileRecord>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -48,6 +37,10 @@ pub struct MemProfileRecord {
     pub free_bytes: i64,
     pub alloc_objects: i64,
     pub free_objects: i64,
+    pub scaled_alloc_objects: f64,
+    pub scaled_alloc_bytes: f64,
+    pub scaled_free_objects: f64,
+    pub scaled_free_bytes: f64,
     pub stack: Box<[StackFrame]>,
 }
 
@@ -58,6 +51,10 @@ impl MemProfileRecord {
             free_bytes: 0,
             alloc_objects: 0,
             free_objects: 0,
+            scaled_alloc_objects: 0.0,
+            scaled_alloc_bytes: 0.0,
+            scaled_free_objects: 0.0,
+            scaled_free_bytes: 0.0,
             stack: stack.to_vec().into_boxed_slice(),
         }
     }
@@ -70,7 +67,8 @@ impl MemProfileRecord {
 /// Values are RAW sampled counts (not scaled by sampling probability);
 /// get_pprof_data() returns scaled values.
 #[pyfunction]
-pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
+pub fn get_profile_data(py: Python<'_>) -> PyResult<Py<PyList>> {
+    let _guard = crate::recursion_guard::MallocRecursionGuard::new();
     // Snapshot under a short lock; building Python objects while holding the
     // global lock would stall every sampled allocation in the process (and
     // any sampled allocation made *by* this thread would self-deadlock).
@@ -102,7 +100,9 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
         });
     }
 
-    Ok(result)
+    // Convert while suppression is active; returning Vec would allocate the
+    // Python list/classes only AFTER the guard had been dropped.
+    Ok(PyList::new(py, result)?.unbind())
 }
 
 /// reset_profile_data()
@@ -114,8 +114,12 @@ pub fn get_profile_data() -> PyResult<Vec<ProfileEntry>> {
 /// frees are not counted.
 #[pyfunction]
 pub fn reset_profile_data() {
+    let _guard = crate::recursion_guard::MallocRecursionGuard::new();
+    let _transaction = PROFILE_TRANSACTION.lock();
+    GENERATION.fetch_add(1, Ordering::Relaxed);
     PROFILE_DATA.lock().clear();
     crate::metadata_store::clear();
+    crate::interner::STRING_INTERNER.lock().clear();
     TOTAL_ALLOC_BYTES.store(0, Ordering::Relaxed);
 }
 
@@ -125,9 +129,14 @@ pub fn reset_profile_data() {
 /// This function returns the heap profile data as a pprof-compatible binary format.
 #[pyfunction]
 #[pyo3(signature = (tags=None, compress=false))]
-pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> PyResult<Vec<u8>> {
+pub fn get_pprof_data(
+    py: Python<'_>,
+    tags: Option<std::collections::HashMap<String, String>>,
+    compress: bool,
+) -> PyResult<Py<PyBytes>> {
+    let _guard = crate::recursion_guard::MallocRecursionGuard::new();
     // Snapshot under a short lock (see get_profile_data); record clones are
-    // cheap because frame strings are interned Cow::Borrowed references.
+    // cheap because frame strings are shared Arc references.
     let records: Vec<MemProfileRecord> = {
         let profile_data = PROFILE_DATA.lock();
         profile_data.values().cloned().collect()
@@ -244,7 +253,7 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
         keep_frames: 0,
         time_nanos: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos() as i64,
         duration_nanos: 0,
         period_type: Some(ValueType {
@@ -363,7 +372,7 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
             //
             // 4b. Deduplicate the function
             //
-            let func_key = (filename_id, func_name_id, lineno);
+            let func_key = (filename_id, func_name_id, frame.first_lineno as i64);
             let function_id = if let Some(&fid) = function_map.get(&func_key) {
                 fid
             } else {
@@ -375,7 +384,7 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
                     name: func_name_id,        // The function name
                     system_name: func_name_id, // Could differ if you like
                     filename: filename_id,
-                    start_line: lineno,
+                    start_line: frame.first_lineno as i64,
                 });
 
                 function_map.insert(func_key, fid);
@@ -394,7 +403,7 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
 
                 profile.location.push(Location {
                     id: lid,
-                    mapping_id: mapping_id,
+                    mapping_id,
                     address: 0,
                     line: vec![Line {
                         function_id,
@@ -410,16 +419,14 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
             location_ids.push(location_id);
         }
 
-        // Calculate inuse values and scale them
-        let sample_rate = SAMPLE_RATE.load(Ordering::Relaxed) as i64;
-
-        let (scaled_alloc_objects, scaled_alloc_bytes) =
-            scale_heap_sample(record.alloc_objects, record.alloc_bytes, sample_rate);
-        let (scaled_free_objects, scaled_free_bytes) =
-            scale_heap_sample(record.free_objects, record.free_bytes, sample_rate);
-
-        let inuse_objects = scaled_alloc_objects - scaled_free_objects;
-        let inuse_bytes = scaled_alloc_bytes - scaled_free_bytes;
+        let scaled_alloc_objects = record.scaled_alloc_objects.round() as i64;
+        let scaled_alloc_bytes = record.scaled_alloc_bytes.round() as i64;
+        let inuse_objects = (record.scaled_alloc_objects - record.scaled_free_objects)
+            .max(0.0)
+            .round() as i64;
+        let inuse_bytes = (record.scaled_alloc_bytes - record.scaled_free_bytes)
+            .max(0.0)
+            .round() as i64;
 
         // Finally, push the Sample
         profile.sample.push(Sample {
@@ -460,9 +467,9 @@ pub fn get_pprof_data(tags: Option<HashMap<String, String>>, compress: bool) -> 
                 e
             ))
         })?;
-        Ok(compressed)
+        Ok(PyBytes::new(py, &compressed).unbind())
     } else {
-        Ok(buf)
+        Ok(PyBytes::new(py, &buf).unbind())
     }
 }
 
@@ -471,31 +478,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scale_zero_is_passthrough() {
-        assert_eq!(scale_heap_sample(0, 0, 1024), (0, 0));
-        assert_eq!(scale_heap_sample(0, 100, 1024), (0, 0));
-        assert_eq!(scale_heap_sample(100, 0, 1024), (0, 0));
-    }
-
-    #[test]
-    fn scale_rate_one_means_no_adjustment() {
-        assert_eq!(scale_heap_sample(10, 1000, 1), (10, 1000));
-        assert_eq!(scale_heap_sample(10, 1000, 0), (10, 1000));
-    }
-
-    #[test]
-    fn scale_small_allocations_scale_up() {
-        // avg size 100 with rate 4096: most allocations were missed, scale > 1
-        let (count, size) = scale_heap_sample(10, 1000, 4096);
-        assert!(count > 10, "count {} should be scaled up", count);
-        assert!(size > 1000, "size {} should be scaled up", size);
-    }
-
-    #[test]
-    fn scale_large_allocations_stay_unscaled() {
-        // avg size 1 MiB with rate 1 KiB: sampling probability ~1, scale ~1
-        let (count, size) = scale_heap_sample(1, 1 << 20, 1024);
-        assert_eq!(count, 1);
-        assert_eq!(size, 1 << 20);
+    fn weights_are_stable_for_extreme_rates_and_sizes() {
+        assert_eq!(sample_weight(100, 1), (1.0, 100.0));
+        assert_eq!(sample_weight(1 << 20, 1024), (1.0, (1 << 20) as f64));
+        let (count, bytes) = sample_weight(1, i32::MAX);
+        assert!(count.is_finite() && bytes.is_finite());
+        assert!(count > 2_000_000_000.0);
+        assert!(sample_weight(0, 1024).0.is_finite());
     }
 }

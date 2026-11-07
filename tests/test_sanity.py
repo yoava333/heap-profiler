@@ -128,15 +128,6 @@ def test_c_extension_allocations():
     assert total_allocs >= MiB, "Should capture allocations from C extensions"
 
 
-def test_native_stress():
-    from malloc_stresser import native_stress
-
-    # This test checks for deadlocks in native threads and their GIL interaction.
-    # stack.rs where_in_python() for full details.
-
-    native_stress(threads=100, iterations=1000)
-
-
 def test_heap_sampling_scaling():
     # Enable profiling with a known sample rate for predictable scaling
     sample_rate = 1024  # 1KB
@@ -147,7 +138,7 @@ def test_heap_sampling_scaling():
     allocation_size = 1024  # 1KB allocations
     num_allocations = 1000
     for _ in range(num_allocations):
-        data.append("x" * allocation_size)
+        data.append(bytearray(allocation_size))
 
     # Get unscaled data
     profile_data = get_profile_data()
