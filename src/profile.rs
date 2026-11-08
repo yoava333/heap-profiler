@@ -60,12 +60,10 @@ impl MemProfileRecord {
     }
 }
 
-/// get_profile_data()
-/// --
+/// Return raw sampled counters for each distinct allocation stack.
 ///
-/// This function returns the heap profile data as a list of tuples.
-/// Values are RAW sampled counts (not scaled by sampling probability);
-/// get_pprof_data() returns scaled values.
+/// Returns a list of ProfileEntry. Counters are not scaled by the sampling
+/// probability; use get_pprof_data() for estimated totals.
 #[pyfunction]
 pub fn get_profile_data(py: Python<'_>) -> PyResult<Py<PyList>> {
     let _guard = crate::recursion_guard::MallocRecursionGuard::new();
@@ -105,13 +103,11 @@ pub fn get_profile_data(py: Python<'_>) -> PyResult<Py<PyList>> {
     Ok(PyList::new(py, result)?.unbind())
 }
 
-/// reset_profile_data()
-/// --
+/// Discard all recorded samples and start a fresh accounting interval.
 ///
-/// Clears all accumulated profile data, per-pointer metadata, and the total
-/// allocation counter. After a reset, inuse values mean "allocated since the
-/// reset": live allocations sampled before it are forgotten and their later
-/// frees are not counted.
+/// Tracing state and the sampling interval are unchanged. Allocations
+/// sampled before the reset are forgotten, including live ones, and their
+/// later frees are not counted.
 #[pyfunction]
 pub fn reset_profile_data() {
     let _guard = crate::recursion_guard::MallocRecursionGuard::new();
@@ -123,10 +119,15 @@ pub fn reset_profile_data() {
     TOTAL_ALLOC_BYTES.store(0, Ordering::Relaxed);
 }
 
-/// pprof_heap()
-/// --
+/// Return the current profile in pprof protobuf format.
 ///
-/// This function returns the heap profile data as a pprof-compatible binary format.
+/// Args:
+///     tags: Optional key/value pairs stored as profile comments.
+///     compress: Gzip the result, as expected for ``.pb.gz`` files.
+///
+/// Sample values are estimated totals: alloc_objects, alloc_space,
+/// inuse_objects, and inuse_space (the default view). Open the result with
+/// ``go tool pprof``.
 #[pyfunction]
 #[pyo3(signature = (tags=None, compress=false))]
 pub fn get_pprof_data(

@@ -33,12 +33,21 @@ pub use stack::{where_in_python, StackFrame};
 #[cfg(test)]
 pub(crate) static GLOBAL_TEST_LOCK: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
-#[pyclass(get_all)]
+/// Raw sampled counters for one allocation stack.
+///
+/// Returned by get_profile_data(). Counters are not scaled by the sampling
+/// probability; live sampled bytes are alloc_bytes - free_bytes.
+#[pyclass(get_all, frozen, module = "heap_profiler")]
 pub struct ProfileEntry {
+    /// Requested bytes of the sampled allocations made from this stack.
     alloc_bytes: i64,
+    /// Requested bytes of those sampled allocations that were later freed.
     free_bytes: i64,
+    /// Number of sampled allocation requests made from this stack.
     alloc_objects: i64,
+    /// Number of those sampled allocations that were later freed.
     free_objects: i64,
+    /// Python frames as (filename, function_name, line_number), innermost first.
     stack_frames: Vec<(String, String, i32)>,
 }
 
@@ -52,7 +61,11 @@ impl ProfileEntry {
     }
 }
 
-/// Initialize the heap profiler
+/// Sampling heap profiler for CPython with pprof export.
+///
+/// Call start_tracing() to begin sampling allocations, get_pprof_data() to
+/// capture a profile for `go tool pprof`, and stop_tracing() to restore the
+/// original allocators.
 #[pymodule]
 fn heap_profiler(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     if unsafe { pyo3::ffi::PyInterpreterState_Get() != pyo3::ffi::PyInterpreterState_Main() } {

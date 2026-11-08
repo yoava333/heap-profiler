@@ -17,13 +17,34 @@ pub(crate) use sampling::reset_sampler_after_fork;
 pub(crate) static TRACING: AtomicBool = AtomicBool::new(false);
 static NATIVE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Return the current mean sampling interval in bytes.
 #[pyfunction]
 pub fn get_sample_rate() -> i32 {
     SAMPLE_RATE.load(Ordering::Relaxed)
 }
 
+/// Start sampling allocations, or update the sampling interval while tracing.
+///
+/// Args:
+///     sample_rate: Mean sampling interval in bytes. Defaults to 128 KiB.
+///         Use 1 to record every allocation request.
+///     native: Also intercept malloc, calloc, realloc, free, posix_memalign,
+///         and aligned_alloc calls made by loaded native libraries.
+///
+/// Calling this again while tracing changes the interval and refreshes native
+/// hooks. Stop tracing before changing ``native``.
+///
+/// Raises:
+///     ValueError: If sample_rate is not positive, or native differs from
+///         the running session.
+///     OverflowError: If sample_rate does not fit in a signed 32-bit integer.
+///     RuntimeError: If the allocator hooks or fork handlers cannot be
+///         installed.
 #[pyfunction]
-#[pyo3(signature = (sample_rate=DEFAULT_SAMPLE_RATE, *, native=true))]
+#[pyo3(
+    signature = (sample_rate=DEFAULT_SAMPLE_RATE, *, native=true),
+    text_signature = "(sample_rate=131072, *, native=True)"
+)]
 pub fn start_tracing(sample_rate: i32, native: bool) -> PyResult<()> {
     let _guard = MallocRecursionGuard::new();
     // Configure sample rate if provided
@@ -58,16 +79,15 @@ pub fn start_tracing(sample_rate: i32, native: bool) -> PyResult<()> {
     Ok(())
 }
 
-/// stop_tracing()
-/// --
+/// Stop sampling and restore the original Python allocators and native hooks.
 ///
-/// Restores the original Python allocators and native hooks. Profile data is
-/// kept and can still be read. Frees of allocations sampled before stopping
-/// are no longer observed, so inuse numbers drift for memory freed while
-/// stopped. Allocator wrappers are retained and reused so in-flight calls and
-/// extensions wrapping our allocators remain valid across start/stop cycles.
+/// Recorded profile data is kept and can still be read. Frees that happen
+/// while tracing is stopped are not observed, so capture a snapshot before
+/// stopping. Calling this when tracing is not active does nothing.
 #[pyfunction]
 pub fn stop_tracing() -> PyResult<()> {
+    // Allocator wrappers are retained and reused so in-flight calls and
+    // extensions wrapping our allocators remain valid across start/stop cycles.
     let _guard = MallocRecursionGuard::new();
     TRACING.store(false, Ordering::Release);
     if !python::restore_session() {
@@ -83,7 +103,11 @@ pub fn stop_tracing() -> PyResult<()> {
     Ok(())
 }
 
-/// Re-scan loaded libraries without interposing caller-sensitive dlopen.
+/// Hook allocator calls in native libraries loaded since tracing started.
+///
+/// Library loading is not intercepted, so call this after importing native
+/// extensions or loading shared libraries. Does nothing unless tracing with
+/// native interception enabled.
 #[pyfunction]
 pub fn refresh_native_hooks() {
     let _guard = MallocRecursionGuard::new();
