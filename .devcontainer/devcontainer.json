@@ -1,25 +1,17 @@
 {
-  "name": "maturin",
-  "image": "mcr.microsoft.com/devcontainers/rust:bullseye",
+  "name": "heap-profiler",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
   "postCreateCommand": "bash .devcontainer/post_create.sh",
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-python.black-formatter",
         "rust-lang.rust-analyzer",
+        "ms-python.python",
         "charliermarsh.ruff"
       ],
       "settings": {
         "editor.formatOnSave": true
       }
     }
-  },
-  "features": {
-    "ghcr.io/devcontainers/features/sshd:1": {
-      "version": "latest"
-    }
-  },
-  "mounts": [
-    "type=bind,source=${localEnv:HOME}/.ssh,target=/vscode/.ssh,readonly"
-  ]
+  }
 }

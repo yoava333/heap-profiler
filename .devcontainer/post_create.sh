@@ -1,11 +1,12 @@
+#!/usr/bin/env bash
 set -euxo pipefail
 
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python install 3.11
-
+# Valgrind provides the instruction counts used by the performance gate.
 sudo apt-get update
-sudo apt-get install -y python3-dev python3-pip python3-venv libclang-dev
+sudo apt-get install -y --no-install-recommends valgrind
 
-uv tool install maturin
-uv tool install cargo-deny
-uv tool install uniffi-bindgen
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Builds the extension into .venv along with the test dependencies.
+uv sync --locked
