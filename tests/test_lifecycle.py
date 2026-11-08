@@ -141,7 +141,7 @@ def test_fork_with_allocating_threads_does_not_deadlock():
             else:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
-                pytest.fail("forked child deadlocked (killed after 30s)")
+                pytest.fail("forked child deadlocked (killed after 30s)")  # ty: ignore[invalid-argument-type]
             assert os.waitstatus_to_exitcode(status) == 0
     finally:
         stop.set()

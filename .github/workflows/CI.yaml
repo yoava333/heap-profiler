@@ -163,6 +163,11 @@ jobs:
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
+      - uses: astral-sh/setup-uv@v5
+      - name: Type check Python
+        run: |
+          uv sync --locked --no-install-project
+          uv run --no-sync ty check --error-on-warning
 
   release:
     name: Release
