@@ -118,6 +118,39 @@ Each entry has `alloc_bytes`, `free_bytes`, `alloc_objects`, `free_objects`, and
 `stack_frames`, whose elements are `(filename, function_name, line_number)`.
 Use the pprof metrics when you need estimates of the full intercepted workload.
 
+## How it works
+
+heap-profiler samples allocations the same way Go's heap profiler
+([`runtime.MemProfileRate`](https://pkg.go.dev/runtime#MemProfileRate)) and
+TCMalloc do; TCMalloc's
+[sampling design document](https://github.com/google/tcmalloc/blob/master/docs/sampling.md)
+explains the method in detail.
+
+1. **Interception.** `start_tracing()` wraps CPython's RAW, MEM, and OBJ
+   allocators with `PyMem_SetAllocator`. With `native=True`, it also rebinds
+   `malloc`-family imports in loaded libraries (ELF GOT on Linux, Mach-O symbol
+   pointers on macOS) so allocations made by C extensions are seen too.
+2. **Sampling.** Each thread keeps a byte countdown drawn from an exponential
+   distribution whose mean is `sample_rate`. Every allocation subtracts its
+   requested size; the allocation that reaches zero is sampled and a new
+   countdown is drawn. This samples each byte with probability `1/sample_rate`
+   independently of allocation boundaries, so an allocation of `s` bytes is
+   sampled with probability `1 - exp(-s / sample_rate)`, and one much larger
+   than the interval is almost always sampled. Unsampled allocations cost only
+   the counter update.
+3. **Recording.** A sampled allocation captures its Python stack, adds to the
+   counters for that stack, and remembers its pointer, so the matching `free`
+   or `realloc` can be credited back to the same stack.
+4. **Estimation.** As in Go's profiler, each sample is weighted by the inverse
+   of its inclusion probability, `1 / (1 - exp(-s / sample_rate))`, giving
+   unbiased estimates of total bytes and objects. heap-profiler computes the
+   weight from each allocation's own size and rate, rather than a per-stack
+   average size, and its free subtracts the identical weight. Live estimates
+   therefore stay consistent when sizes vary or the rate changes.
+5. **Export.** `get_pprof_data()` writes those estimates as a pprof profile
+   with `alloc_objects`, `alloc_space`, `inuse_objects`, and `inuse_space`
+   sample types, which `go tool pprof` reads as a heap profile.
+
 ## Intervals and configuration
 
 ```python
@@ -153,11 +186,13 @@ set `HEAP_PROFILER_LOG=heap_profiler=debug` to log to stderr.
 
 ## Platforms and coverage
 
-| Platform | Architectures | Native interception |
-| --- | --- | --- |
-| Linux with glibc | x86_64, ARM64 | Eligible ELF allocator imports |
-| macOS | x86_64, ARM64 | Eligible Mach-O allocator bindings |
-| Windows (experimental port) | x86_64 | Not included in the main branch yet |
+| Platform | Architectures | Prebuilt wheels | Native interception |
+| --- | --- | --- | --- |
+| Linux with glibc | x86_64, ARM64 | x86_64, ARM64 (manylinux_2_28) | Eligible ELF allocator imports |
+| macOS | x86_64, ARM64 | ARM64 | Eligible Mach-O allocator bindings |
+
+On platforms without a prebuilt wheel, pip builds from source, which requires a
+Rust toolchain.
 
 Python allocator hooks cover the RAW, MEM, and OBJ domains. Native coverage
 includes eligible `malloc`, `calloc`, `realloc`, and `free` calls, plus
@@ -171,9 +206,6 @@ sections, and chained fixups. Avoid concurrent native library unloading while
 starting, stopping, or refreshing hooks. Library loading APIs are not replaced;
 refresh explicitly after loading extensions.
 
-The experimental Windows port has been validated with MSVC on CPython 3.13 and
-3.15. It is being developed separately from the Unix release.
-
 Free-threaded CPython and subinterpreters are unsupported. Stacks contain up to
 128 Python frames; detached and native threads have explicit marker frames.
 Sampling does not attach a Python thread or acquire the GIL from native callbacks.
@@ -181,12 +213,26 @@ Sampling does not attach a Python thread or acquire the GIL from native callback
 ## Overhead
 
 Overhead depends on allocation frequency, stack depth, sampling interval, and
-native coverage. The included allocation-heavy benchmarks measured roughly
-1.4×–2.1× total runtime on tested ARM64 Linux/macOS systems at the default
-interval. Those numbers are workload-specific; measure your application and
-increase the interval when throughput matters more than sampling resolution.
-See [the benchmark results](docs/overhead-profiling.md) and
-[benchmarks/overhead.py](benchmarks/overhead.py).
+native coverage. At the default interval, the allocation-heavy benchmarks in
+[benchmarks/overhead.py](benchmarks/overhead.py) execute about 1.5× (small
+allocations) and 1.7× (4 KiB allocations) the instructions of an unprofiled
+run on ARM64 Linux with CPython 3.13. A compression workload dominated by
+native code is unaffected. These are worst cases for allocation-bound code;
+measure your application and increase the interval when throughput matters
+more than sampling resolution.
+
+CI enforces these ratios with Valgrind instruction counts, which are
+deterministic, unlike wall time on shared runners. To check a change locally
+on Linux with Valgrind installed:
+
+```sh
+python benchmarks/instruction_gate.py --python .venv/bin/python
+```
+
+The budget in [benchmarks/instruction_budget.json](benchmarks/instruction_budget.json)
+records the architecture and exact Python version it was measured with. After
+an intentional overhead change, re-record it on that setup with `--update`.
+For wall-clock timings, run `benchmarks/overhead.py` with and without `--tracing`.
 
 Profiler memory grows with distinct allocation stacks and sampled live pointers.
 Reset periodically to release accumulated history. Immutable Python allocator
@@ -203,17 +249,19 @@ cd heap-profiler
 uv sync --locked
 ```
 
-Run checks with:
+`uv sync` builds the extension into `.venv`. Rebuild it after Rust changes with
+`uv sync --reinstall-package heap-profiler`. Run checks with:
 
 ```sh
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+uv run ty check
 uv run pytest -q tests/
 ```
 
-Windows users should use the experimental port rather than building this Unix
-release branch.
+The [dev container](.devcontainer/devcontainer.json) provides a Linux
+environment with these tools and Valgrind for the instruction gate.
 
 Release maintainers: see [the PyPI publishing setup](docs/publishing.md).
 
