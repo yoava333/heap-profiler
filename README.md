@@ -201,6 +201,13 @@ bindings, direct function pointers obtained through `dlsym`, unresolved lazy
 bindings, and memory obtained through APIs such as `mmap` are outside that
 native coverage. Python hooks work independently of native interception.
 
+On Linux, allocations made directly by a non-PIE executable that takes
+`malloc`'s address are also not intercepted. The dynamic loader routes its own
+internal allocations through that executable's binding, so hooking it is
+unsafe. This includes python-build-standalone's x86_64 builds of CPython 3.12
+and later, which uv installs; there, native coverage applies to extension
+modules and other shared libraries.
+
 On macOS, native hooks skip the dyld shared cache, authenticated pointer
 sections, and chained fixups. Avoid concurrent native library unloading while
 starting, stopping, or refreshing hooks. Library loading APIs are not replaced;

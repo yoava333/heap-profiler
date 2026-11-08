@@ -79,6 +79,19 @@ pub struct Elf64_Sym {
     st_size: u64,
 }
 
+impl Elf64_Sym {
+    /// A non-PIE executable that takes an imported function's address exports
+    /// it as an undefined symbol whose value is its own PLT stub. The loader
+    /// then resolves the name to that stub everywhere, including for its own
+    /// internal malloc, so the GOT slot behind the stub is effectively the
+    /// process-wide malloc. Hooking it routes ld.so's lazy TLS allocation into
+    /// our hook, whose first TLS access recurses until the stack overflows.
+    fn is_canonical_plt_entry(&self) -> bool {
+        const SHN_UNDEF: u16 = 0;
+        self.st_shndx == SHN_UNDEF && self.st_value != 0
+    }
+}
+
 struct SymbolTable {
     symtab: *const Elf64_Sym,
     strtab: *const u8,
@@ -448,6 +461,9 @@ unsafe fn overwrite_elf_table<T>(
 
             // Get symbol from the symbol table
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
+            if sym.is_canonical_plt_entry() {
+                continue;
+            }
             if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {
                 debug!(
                     "Found symbol: {} at address: {:#x}",
@@ -609,6 +625,9 @@ unsafe fn overwrite_plt_table<T>(
             let symbol_idx = reloc.symbol_index();
 
             let sym = &*symbol_table.symtab.add(symbol_idx as usize);
+            if sym.is_canonical_plt_entry() {
+                continue;
+            }
             if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {
                 debug!(
                     "Found PLT symbol: {} at address: {:#x}",
@@ -634,5 +653,31 @@ unsafe fn overwrite_plt_table<T>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn symbol(st_shndx: u16, st_value: Elf64_Addr) -> Elf64_Sym {
+        Elf64_Sym {
+            st_name: 1,
+            st_info: 0x12, // STB_GLOBAL, STT_FUNC
+            st_other: 0,
+            st_shndx,
+            st_value,
+            st_size: 0,
+        }
+    }
+
+    #[test]
+    fn only_undefined_symbols_with_a_value_are_canonical_plt_entries() {
+        // Non-PIE executable that takes malloc's address: never patch.
+        assert!(symbol(0, 0x127e550).is_canonical_plt_entry());
+        // Ordinary import in a PIE executable or shared library: patch.
+        assert!(!symbol(0, 0).is_canonical_plt_entry());
+        // Defined symbol (a custom allocator): not an import at all.
+        assert!(!symbol(14, 0x4000).is_canonical_plt_entry());
     }
 }
