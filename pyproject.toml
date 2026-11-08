@@ -27,8 +27,9 @@ dev = [
     "protobuf>=5.29.3",
     "psutil>=6.1.1",
     "pyperformance>=1.11.0",
-    "pytest>=8.3.4,<9",
-    "pytest-forked>=1.6.0,<1.7",
+    # pytest 9 breaks @pytest.mark.forked: every forked test exits with status 3.
+    "pytest>=8.4.2,<9",
+    "pytest-forked>=1.7.5",
     "pytest-timeout>=2.4.0",
     "ruff>=0.14",
     "ty>=0.0.99",
