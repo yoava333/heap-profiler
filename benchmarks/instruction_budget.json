@@ -1,0 +1,21 @@
+{
+  "machine": "aarch64",
+  "python": "3.13.18",
+  "workloads": {
+    "small_allocations": {
+      "iterations": 20000,
+      "recorded_ratio": 1.539,
+      "max_ratio": 1.693
+    },
+    "medium_allocations": {
+      "iterations": 20000,
+      "recorded_ratio": 1.66,
+      "max_ratio": 1.826
+    },
+    "compression": {
+      "iterations": 4000,
+      "recorded_ratio": 1.001,
+      "max_ratio": 1.101
+    }
+  }
+}

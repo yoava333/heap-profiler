@@ -61,56 +61,35 @@ jobs:
           path: dist
 
   performance:
+    # Instruction counts are deterministic for a given architecture and
+    # interpreter build, so this runs on the setup recorded in the budget.
     needs: linux
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
       - uses: actions/download-artifact@v4
         with:
-          name: wheels-linux-x86_64-3.11
+          name: wheels-linux-aarch64-3.13
           path: dist
       - uses: astral-sh/setup-uv@v5
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
       - name: Install the wheel under test
         run: |
-          uv venv .venv --python 3.11
+          uv venv .venv --python "$(jq -r .python benchmarks/instruction_budget.json)"
           uv pip install --python .venv/bin/python --no-deps dist/*.whl
-      - name: Measure overhead in the actual benchmark interpreter
-        run: |
-          .venv/bin/python benchmarks/overhead.py --iterations 100000 > baseline.json
-          .venv/bin/python benchmarks/overhead.py --iterations 100000 --tracing > with_profiler.json
-      - name: Check slowdown
-        run: |
-          set -o pipefail
-          .venv/bin/python - <<'PY' | tee performance_comparison.txt
-          import json
-          import math
-          with open("baseline.json") as stream:
-              baseline = json.load(stream)
-          with open("with_profiler.json") as stream:
-              profiled = json.load(stream)
-          assert baseline and baseline.keys() == profiled.keys()
-          failures = []
-          for name, seconds in baseline.items():
-              assert math.isfinite(seconds) and seconds > 0
-              ratio = profiled[name] / seconds
-              assert math.isfinite(ratio) and ratio > 0
-              print(f"{name}: {ratio:.2f}x baseline")
-              if ratio > 2.5:
-                  failures.append(name)
-          if failures:
-              raise SystemExit(f"More than 2.5x overhead: {failures}")
-          PY
+      - name: Check instruction overhead
+        run: python3 benchmarks/instruction_gate.py --python .venv/bin/python --output instruction_counts.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: performance-results
-          path: |
-            baseline.json
-            with_profiler.json
-            performance_comparison.txt
+          path: instruction_counts.json
 
   macos:
     runs-on: macos-latest
