@@ -6,7 +6,7 @@ on:
       - main
       - master
     tags:
-      - "*"
+      - "v*"
     paths-ignore:
       - "README.md"
 
@@ -51,7 +51,7 @@ jobs:
               source "$HOME/.cargo/env"
               tag="cp${PYTHON_VERSION//./}"
               python="/opt/python/${tag}-${tag}/bin/python"
-              "$python" -m pip install "maturin>=1.7,<2"
+              "$python" -m pip install "maturin>=1.9.3,<2"
               "$python" -m maturin build --locked --release --out dist -i "$python" --compatibility manylinux_2_28
             '
 
@@ -114,7 +114,7 @@ jobs:
       - name: Build wheels
         run: |
           uv python install ${{ matrix.python-version }}
-          uvx --from "maturin>=1.7,<2" maturin build --locked --release --out dist \
+          uvx --from "maturin>=1.9.3,<2" maturin build --locked --release --out dist \
             -i "$(uv python find --system ${{ matrix.python-version }})"
 
       - name: Run tests
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
       - name: Build sdist
-        run: uvx --from "maturin>=1.7,<2" maturin sdist --out dist
+        run: uvx --from "maturin>=1.9.3,<2" maturin sdist --out dist
       - name: Upload sdist
         uses: actions/upload-artifact@v7
         with:
@@ -176,7 +176,7 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [linux, macos, sdist, tests, performance]
     environment:
       name: pypi
@@ -185,6 +185,15 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag matches the package version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
       - name: Download release distributions
         uses: actions/download-artifact@v8
         with:

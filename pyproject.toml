@@ -1,7 +1,19 @@
 [project]
 name = "heap-profiler"
+description = "Sampling heap profiler for CPython with pprof output, written in Rust"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [{ name = "Yoav Alon" }]
+keywords = ["profiler", "memory", "heap", "pprof", "allocation"]
 requires-python = ">=3.11,<3.16"
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: System :: Monitoring",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3.11",
@@ -13,8 +25,12 @@ classifiers = [
 dynamic = ["version"]
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/yoava333/heap-profiler"
+Issues = "https://github.com/yoava333/heap-profiler/issues"
+
 [build-system]
-requires = ["maturin>=1.7,<2.0"]
+requires = ["maturin>=1.9.3,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]

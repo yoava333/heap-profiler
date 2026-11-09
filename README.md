@@ -4,9 +4,9 @@ A sampling heap profiler for CPython, written in Rust. Track Python allocator
 requests and selected native allocations, then explore the allocation stacks
 in Go's pprof web interface.
 
-![Go pprof Flame Graph showing estimated in-use memory by Python allocation stack](docs/images/pprof-web.png)
+![Go pprof Flame Graph showing estimated in-use memory by Python allocation stack](https://github.com/yoava333/heap-profiler/raw/main/docs/images/pprof-web.png)
 
-*The pprof web UI displaying a real profile from [the included demo](examples/pprof_demo.py).
+*The pprof web UI displaying a real profile from [the included demo](https://github.com/yoava333/heap-profiler/blob/main/examples/pprof_demo.py).
 Bar widths show estimated in-use bytes. The demo retains 48 MiB of buffer payload;
 allocator overhead and sampling affect the reported estimate.*
 
@@ -81,7 +81,7 @@ go tool pprof -http=127.0.0.1:8080 -sample_index=inuse_space heap.pb.gz
 
 The demo also allocates and frees 8 MiB of temporary buffers. Compare
 `alloc_space` with `inuse_space` to see that temporary work in the profile.
-For an HTTP endpoint, see [examples/pprof_server.py](examples/pprof_server.py).
+For an HTTP endpoint, see [examples/pprof_server.py](https://github.com/yoava333/heap-profiler/blob/main/examples/pprof_server.py).
 Its Flask dependency is optional and only needed for that example.
 
 ## Sampling and accuracy
@@ -221,7 +221,7 @@ Sampling does not attach a Python thread or acquire the GIL from native callback
 
 Overhead depends on allocation frequency, stack depth, sampling interval, and
 native coverage. At the default interval, the allocation-heavy benchmarks in
-[benchmarks/overhead.py](benchmarks/overhead.py) execute about 1.5× (small
+[benchmarks/overhead.py](https://github.com/yoava333/heap-profiler/blob/main/benchmarks/overhead.py) execute about 1.5× (small
 allocations) and 1.7× (4 KiB allocations) the instructions of an unprofiled
 run on ARM64 Linux with CPython 3.13. A compression workload dominated by
 native code is unaffected. These are worst cases for allocation-bound code;
@@ -236,7 +236,7 @@ on Linux with Valgrind installed:
 python benchmarks/instruction_gate.py --python .venv/bin/python
 ```
 
-The budget in [benchmarks/instruction_budget.json](benchmarks/instruction_budget.json)
+The budget in [benchmarks/instruction_budget.json](https://github.com/yoava333/heap-profiler/blob/main/benchmarks/instruction_budget.json)
 records the architecture and exact Python version it was measured with. After
 an intentional overhead change, re-record it on that setup with `--update`.
 For wall-clock timings, run `benchmarks/overhead.py` with and without `--tracing`.
@@ -267,12 +267,12 @@ uv run ty check
 uv run pytest -q tests/
 ```
 
-The [dev container](.devcontainer/devcontainer.json) provides a Linux
+The [dev container](https://github.com/yoava333/heap-profiler/blob/main/.devcontainer/devcontainer.json) provides a Linux
 environment with these tools and Valgrind for the instruction gate.
 
-Release maintainers: see [the PyPI publishing setup](docs/publishing.md).
+Release maintainers: see [the PyPI publishing setup](https://github.com/yoava333/heap-profiler/blob/main/docs/publishing.md).
 
 ## License
 
-[MIT](LICENSE.txt). Python bindings use [PyO3](https://pyo3.rs/); profile exports
+[MIT](https://github.com/yoava333/heap-profiler/blob/main/LICENSE.txt). Python bindings use [PyO3](https://pyo3.rs/); profile exports
 use the [pprof format](https://github.com/google/pprof).
