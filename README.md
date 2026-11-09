@@ -18,9 +18,8 @@ Requires **GIL-enabled CPython 3.11–3.15** and a supported 64-bit platform.
 python -m pip install heap-profiler
 ```
 
-The first PyPI release is being prepared. Until it is published, use the
-[source build](#build-from-source) below. Installing a wheel needs no Rust
-toolchain; building from source does.
+Installing a prebuilt wheel needs no Rust toolchain. On platforms without one,
+pip falls back to the [source build](#build-from-source), which does.
 
 ## Capture a profile
 
