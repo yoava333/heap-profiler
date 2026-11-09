@@ -19,7 +19,7 @@ pytestmark = [pytest.mark.forked, pytest.mark.no_tracing]
 def native(tmp_path):
     compiler = shutil.which("cc")
     if not compiler:
-        pytest.skip("native regression tests require a C compiler")  # ty: ignore[too-many-positional-arguments]
+        pytest.skip("native regression tests require a C compiler")
     source = tmp_path / "probe.c"
     library = tmp_path / "probe.so"
     source.write_text("""
@@ -204,7 +204,7 @@ def test_subinterpreter_history_does_not_fake_gil_ownership(native):
 def test_dlopen_preserves_callers_runpath(native, tmp_path):
     compiler = shutil.which("cc")
     if not compiler:
-        pytest.skip("C compiler required")  # ty: ignore[too-many-positional-arguments]
+        pytest.skip("C compiler required")
     child = tmp_path / "child.c"
     child.write_text("int answer(void) { return 42; }")
     caller = tmp_path / "caller.c"
@@ -292,7 +292,7 @@ def test_fork_while_native_threads_hold_profiler_locks(native):
             else:
                 os.kill(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
-                pytest.fail("forked child deadlocked during native allocation")  # ty: ignore[invalid-argument-type]
+                pytest.fail("forked child deadlocked during native allocation")
     finally:
         stop.set()
         for thread in threads:

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.no_tracing
 def compile_library(tmp_path, source, *, cpp=False):
     compiler = shutil.which("c++" if cpp else "cc")
     if not compiler:
-        pytest.skip("C/C++ compiler required")  # ty: ignore[too-many-positional-arguments]
+        pytest.skip("C/C++ compiler required")
     path = tmp_path / ("probe.cpp" if cpp else "probe.c")
     library = tmp_path / "probe.so"
     path.write_text(source)
