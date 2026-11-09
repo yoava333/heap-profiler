@@ -15,7 +15,9 @@ pytestmark = [pytest.mark.forked, pytest.mark.no_tracing]
 @pytest.mark.parametrize("raw", [False, True], ids=["native", "raw"])
 @pytest.mark.parametrize("rate", [1, 2, 128])
 def test_zero_size_requests_are_sampled_and_freed(tmp_path, raw, rate):
-    library = compile_library(tmp_path, r"""
+    library = compile_library(
+        tmp_path,
+        r"""
         #include <stddef.h>
         #include <stdlib.h>
         extern void *PyMem_RawMalloc(size_t);
@@ -35,7 +37,8 @@ def test_zero_size_requests_are_sampled_and_freed(tmp_path, raw, rate):
                 if (raw) PyMem_RawFree(p); else free(p);
             }
         }
-    """)
+    """,
+    )
     lib = ctypes.CDLL(str(library))
     lib.allocate.argtypes = [ctypes.c_int]
     lib.allocate.restype = ctypes.c_int
@@ -49,7 +52,8 @@ def test_zero_size_requests_are_sampled_and_freed(tmp_path, raw, rate):
     try:
         assert lib.allocate(raw) == 0
         sampled = sum(
-            entry.alloc_objects for entry in h.get_profile_data()
+            entry.alloc_objects
+            for entry in h.get_profile_data()
             if any(frame[0] == "<detached thread>" for frame in entry.stack_frames)
         )
         probability = 1.0 if rate == 1 else -math.expm1(-1.0 / rate)

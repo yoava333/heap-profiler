@@ -1,4 +1,5 @@
 """Create a small heap profile for exploring the Go pprof web interface."""
+
 import argparse
 from pathlib import Path
 
@@ -80,7 +81,9 @@ def main():
         + sum(map(len, responses))
     )
     print(f"Profile written to {args.output}")
-    print(f"Retained payload: {retained_bytes / 1024**2:.0f} MiB; temporary payload: {temporary_bytes / 1024**2:.0f} MiB")
+    print(
+        f"Retained payload: {retained_bytes / 1024**2:.0f} MiB; temporary payload: {temporary_bytes / 1024**2:.0f} MiB"
+    )
 
 
 if __name__ == "__main__":

@@ -242,7 +242,9 @@ void finish(void) {atomic_store(&stop,1);for(int i=0;i<4;i++) pthread_join(worke
 
 
 def test_fork_from_cpp_thread_local_destructor(tmp_path):
-    library = compile_library(tmp_path, r"""
+    library = compile_library(
+        tmp_path,
+        r"""
         #include <pthread.h>
         #include <sys/wait.h>
         #include <unistd.h>
@@ -266,7 +268,9 @@ def test_fork_from_cpp_thread_local_destructor(tmp_path):
             if (pthread_create(&thread, nullptr, worker, nullptr)) return 1;
             return pthread_join(thread, nullptr);
         }
-    """, cpp=True)
+    """,
+        cpp=True,
+    )
     run_code(f"""
         import ctypes
         import heap_profiler as h

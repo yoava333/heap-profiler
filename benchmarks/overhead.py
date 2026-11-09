@@ -1,4 +1,5 @@
 """Run in separate interpreters, with and without --tracing, to compare overhead."""
+
 import argparse
 import json
 import statistics
@@ -9,7 +10,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--tracing", action="store_true")
 parser.add_argument("--repeat", type=int, default=7)
 parser.add_argument("--iterations", type=int, default=10000)
-parser.add_argument("--workload", choices=["all", "small_allocations", "medium_allocations", "compression"], default="all")
+parser.add_argument(
+    "--workload", choices=["all", "small_allocations", "medium_allocations", "compression"], default="all"
+)
 args = parser.parse_args()
 
 
@@ -35,6 +38,7 @@ def compression():
 
 if args.tracing:
     import heap_profiler
+
     heap_profiler.start_tracing()
 
 results = {}

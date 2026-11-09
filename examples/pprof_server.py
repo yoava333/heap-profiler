@@ -1,7 +1,8 @@
 from datetime import datetime
 
-import heap_profiler
 from flask import Flask, Response
+
+import heap_profiler
 
 app = Flask(__name__)
 

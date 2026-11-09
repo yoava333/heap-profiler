@@ -155,7 +155,7 @@ explains the method in detail.
 ```python
 heap_profiler.reset_profile_data()  # Start a fresh accounting interval.
 heap_profiler.start_tracing(sample_rate=64 * 1024)  # Change the rate while running.
-heap_profiler.stop_tracing()        # Restore allocator tables and native hooks.
+heap_profiler.stop_tracing()  # Restore allocator tables and native hooks.
 ```
 
 Reset forgets allocations sampled before the reset, including those still live;
@@ -176,6 +176,7 @@ refresh its hooks:
 
 ```python
 import lzma  # Load a native standard-library extension.
+
 heap_profiler.refresh_native_hooks()
 ```
 

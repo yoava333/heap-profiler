@@ -172,6 +172,10 @@ jobs:
         run: |
           uv sync --locked --no-install-project
           uv run --no-sync ty check --error-on-warning
+      - name: Lint and format Python
+        run: |
+          uv run --no-sync ruff check --no-fix
+          uv run --no-sync ruff format --check
 
   release:
     name: Release
