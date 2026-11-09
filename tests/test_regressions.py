@@ -1,5 +1,6 @@
 """Regression tests exercise the public API in bounded subprocesses."""
 
+import json
 import os
 import subprocess
 import sys
@@ -172,3 +173,25 @@ def test_snapshot_outputs_are_not_profiled():
         assert len(a) == 0
         h.stop_tracing()
     """)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="direct frame reads exist on CPython 3.14+")
+def test_direct_frame_reads_are_used_on_this_interpreter():
+    # A layout mismatch silently falls back to the slower C-API walk. Fail
+    # instead, so a new CPython minor version gets a layout entry.
+    result = subprocess.run(
+        [sys.executable, "-c", "import heap_profiler as h; h.start_tracing(); h.stop_tracing()"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "HEAP_PROFILER_LOG": "heap_profiler=debug"},
+    )
+    assert result.returncode == 0, result.stderr
+    layouts = [
+        record["fields"]["valid"]
+        for line in result.stderr.splitlines()
+        if line.startswith("{")
+        for record in [json.loads(line)]
+        if record.get("fields", {}).get("message") == "Frame layout table"
+    ]
+    assert layouts == [True]

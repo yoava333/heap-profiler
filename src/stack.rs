@@ -8,6 +8,9 @@ use tracing::{debug, warn};
 use crate::interner::intern;
 use crate::recursion_guard::PythonGCGuard;
 
+#[cfg(Py_3_14)]
+mod raw_frames;
+
 static EMPTY_STRING: Lazy<Arc<str>> = Lazy::new(|| Arc::from(""));
 
 const NATIVE_THREAD_MARKER: &str = "<native thread>";
@@ -85,7 +88,12 @@ unsafe fn read_str_attr(obj: *mut ffi::PyObject, attr: &CStr) -> Option<Arc<str>
         .map(intern)
 }
 
-unsafe fn walk_frames(thread_state: *mut ffi::PyThreadState, stack: &mut StackBuffer) -> usize {
+/// Walks frames through the C API. Used before 3.14, and on 3.14+ when the
+/// frame layout table does not match this build.
+unsafe fn walk_frames_capi(
+    thread_state: *mut ffi::PyThreadState,
+    stack: &mut StackBuffer,
+) -> usize {
     let mut depth: usize = 0;
 
     // SAFETY: PyThreadState_GetFrame is safe to call on a valid thread state
@@ -146,6 +154,36 @@ unsafe fn walk_frames(thread_state: *mut ffi::PyThreadState, stack: &mut StackBu
     depth
 }
 
+/// Walks frames by reading interpreter memory directly, like tracemalloc. It
+/// creates no Python objects and touches no reference counts, so it cannot
+/// allocate Python memory, run code, or raise inside the allocator hook.
+#[cfg(Py_3_14)]
+unsafe fn walk_frames_raw(
+    layout: &raw_frames::Layout,
+    thread_state: *mut ffi::PyThreadState,
+    stack: &mut StackBuffer,
+) -> usize {
+    let mut scratch = String::new();
+    raw_frames::for_each_frame(layout, thread_state, 128, |frame| {
+        let filename = match raw_frames::read_str(frame.filename, &mut scratch) {
+            // Skip frames from the importer machinery, as the C-API walk does.
+            Some(text) if !text.starts_with("<frozen importlib.") => intern(text),
+            _ => return false,
+        };
+        let function_name = raw_frames::read_str(frame.name, &mut scratch)
+            .map(intern)
+            .unwrap_or_else(|| Arc::clone(&EMPTY_STRING));
+        stack.push(StackFrame {
+            filename,
+            lineno: frame.lineno,
+            first_lineno: frame.first_lineno,
+            function_name,
+        });
+        true
+    });
+    stack.len()
+}
+
 pub fn where_in_python(stack: &mut StackBuffer) -> usize {
     stack.clear();
     #[cfg(Py_3_13)]
@@ -176,6 +214,12 @@ pub fn where_in_python(stack: &mut StackBuffer) -> usize {
         return 1;
     }
 
+    #[cfg(Py_3_14)]
+    if let Some(layout) = raw_frames::layout() {
+        // SAFETY: this thread owns the attached thread state checked above.
+        return unsafe { walk_frames_raw(&layout, thread_state, stack) };
+    }
+
     {
         // disable gc
         let _gc_guard = PythonGCGuard::new();
@@ -196,7 +240,7 @@ pub fn where_in_python(stack: &mut StackBuffer) -> usize {
         };
 
         // SAFETY: thread state is valid and we hold the GIL
-        let depth = unsafe { walk_frames(thread_state, stack) };
+        let depth = unsafe { walk_frames_capi(thread_state, stack) };
 
         #[cfg(Py_3_12)]
         unsafe {
@@ -215,4 +259,7 @@ pub(crate) fn initialize_markers() {
     Lazy::force(&NATIVE_FILENAME);
     Lazy::force(&DETACHED_FILENAME);
     Lazy::force(&NATIVE_FUNCTION);
+    // Validate the frame layout once, outside any allocator hook.
+    #[cfg(Py_3_14)]
+    debug!(valid = raw_frames::layout().is_some(), "Frame layout table");
 }
