@@ -1,6 +1,8 @@
 """Test real native call sites, not ctypes' cached dlsym function pointers."""
 
 import ctypes
+import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -298,3 +300,60 @@ def test_fork_while_native_threads_hold_profiler_locks(native):
         for thread in threads:
             thread.join(timeout=5)
             assert not thread.is_alive()
+
+
+def test_libraries_under_a_heap_profiler_directory_are_hooked(tmp_path):
+    compiler = shutil.which("cc")
+    if not compiler:
+        pytest.skip("native regression tests require a C compiler")
+    # The patcher once recognized itself by this path substring and skipped
+    # every library whose path contained it.
+    directory = tmp_path / "heap_profiler_project"
+    directory.mkdir()
+    source = directory / "probe.c"
+    library = directory / "probe.so"
+    source.write_text("""
+        #include <stdlib.h>
+        void *allocate(size_t n) { return malloc(n); }
+        void release(void *p) { free(p); }
+    """)
+    flags = ["-shared", "-fPIC", "-fno-builtin"]
+    if sys.platform == "linux":
+        flags += ["-Wl,-z,relro,-z,now"]
+    subprocess.run([compiler, *flags, str(source), "-o", str(library)], check=True, capture_output=True)  # noqa: S603
+    lib = ctypes.CDLL(str(library), mode=os.RTLD_NOW)
+    lib.allocate.argtypes = [ctypes.c_size_t]
+    lib.allocate.restype = ctypes.c_void_p
+    lib.release.argtypes = [ctypes.c_void_p]
+    lib.release(lib.allocate(8))  # Resolve lazy bindings before patching.
+    h.start_tracing(1)
+    try:
+        h.reset_profile_data()
+        pointer = lib.allocate(123457)
+        assert detached_profile()[1] == 123457
+        lib.release(pointer)
+    finally:
+        h.stop_tracing()
+
+
+def test_native_patching_skips_only_this_extension():
+    result = subprocess.run(
+        [sys.executable, "-c", "import heap_profiler as h; h.start_tracing(); h.stop_tracing()"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "HEAP_PROFILER_LOG": "heap_profiler=debug"},
+    )
+    assert result.returncode == 0, result.stderr
+    prefix = "Skipping this extension: "
+    skipped = {
+        message.removeprefix(prefix)
+        for line in result.stderr.splitlines()
+        if line.startswith("{")
+        for message in [json.loads(line).get("fields", {}).get("message", "")]
+        if message.startswith(prefix)
+    }
+    # Applying and restoring hooks both skip the extension, and nothing else.
+    extension = importlib.util.find_spec("heap_profiler.heap_profiler")
+    assert extension and extension.origin
+    assert {os.path.realpath(path) for path in skipped} == {os.path.realpath(extension.origin)}

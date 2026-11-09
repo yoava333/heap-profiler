@@ -13,8 +13,6 @@ use crate::platform::Hook;
 /// macOS-specific implementation of the symbol patcher
 pub struct MacOSPatcher {
     hooks: Vec<Hook>,
-    #[allow(unused)]
-    self_so_name: String,
 }
 
 /// A global to ensure we don't run hooking simultaneously in multiple threads.
@@ -93,11 +91,8 @@ const S_LAZY_SYMBOL_POINTERS: u32 = 0x7;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 0x6;
 
 impl Patcher for MacOSPatcher {
-    fn new(self_name: String) -> Self {
-        MacOSPatcher {
-            hooks: Vec::new(),
-            self_so_name: self_name,
-        }
+    fn new() -> Self {
+        MacOSPatcher { hooks: Vec::new() }
     }
 
     fn register_hook(&mut self, hook: Hook) {
@@ -281,10 +276,7 @@ unsafe fn patch_symbols_in_shared_object(
     // idempotent, and skipping by name would permanently miss an image that
     // was unloaded and loaded again at the same path.
     let image_str = image_name.to_string_lossy();
-    if image_str.contains("libdyld.dylib")
-        || image_str.contains("/usr/lib/system/")
-        || image_str.contains("heap_profiler")
-    {
+    if image_str.contains("libdyld.dylib") || image_str.contains("/usr/lib/system/") {
         return;
     }
 
@@ -333,7 +325,19 @@ unsafe fn patch_symbols_in_shared_object(
     }
 }
 
+/// The Mach-O header of the image containing this extension.
+unsafe fn own_image_header() -> *const c_void {
+    let mut info: libc::Dl_info = mem::zeroed();
+    if libc::dladdr(own_image_header as *const c_void, &mut info) == 0 {
+        return ptr::null();
+    }
+    info.dli_fbase as *const c_void
+}
+
 unsafe fn patch_symbols_in_all_shared_objects(hooks: &[Hook], restore_original: bool) {
+    // Recognize this extension by address: its path can be anything, and a
+    // path substring check also skips every image under a matching directory.
+    let own_header = own_image_header();
     let count = _dyld_image_count();
     for i in 0..count {
         let header = _dyld_get_image_header(i);
@@ -346,9 +350,12 @@ unsafe fn patch_symbols_in_all_shared_objects(hooks: &[Hook], restore_original: 
             continue;
         }
         let image_name = CStr::from_ptr(name_ptr);
+        if header as *const c_void == own_header {
+            debug!("Skipping this extension: {}", image_name.to_string_lossy());
+            continue;
+        }
         if image_name.to_string_lossy().contains("libdyld.dylib")
             || image_name.to_string_lossy().contains("/usr/lib/system/")
-            || image_name.to_string_lossy().contains("heap_profiler")
         {
             continue;
         }

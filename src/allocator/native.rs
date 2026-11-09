@@ -177,7 +177,7 @@ pub(super) fn init_native_hooks() -> PyResult<()> {
     // Initialize global patcher if not already initialized
     let mut patcher_guard = GLOBAL_PATCHER.lock();
     if patcher_guard.is_none() {
-        let mut patcher = PlatformPatcher::new("heap_profiler".to_string());
+        let mut patcher = PlatformPatcher::new();
         use crate::platform::Hook;
         patcher.register_hook(Hook {
             symbol_name: "malloc",

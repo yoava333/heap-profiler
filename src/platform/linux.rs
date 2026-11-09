@@ -1,4 +1,6 @@
-use libc::{c_char, c_int, c_void, dl_iterate_phdr, dl_phdr_info, mprotect, size_t, PT_DYNAMIC};
+use libc::{
+    c_char, c_int, c_void, dl_iterate_phdr, dl_phdr_info, mprotect, size_t, PT_DYNAMIC, PT_LOAD,
+};
 use std::ffi::CStr;
 use std::mem;
 use std::ptr;
@@ -146,13 +148,11 @@ impl SymbolTable {
 /// Linux-specific implementation of the symbol patcher
 pub struct LinuxPatcher {
     hooks: Vec<Hook>,
-    self_so_name: String,
 }
 
 /// Holds context to pass through dl_iterate_phdr's callback.
 struct ElfPatcherContext<'a> {
     restore_original: bool,
-    self_so_name: &'a str,
     hooks: &'a [Hook],
     mappings: &'a [MemoryRegion],
 }
@@ -161,11 +161,8 @@ struct ElfPatcherContext<'a> {
 static IS_HOOKING: AtomicBool = AtomicBool::new(false);
 
 impl Patcher for LinuxPatcher {
-    fn new(self_name: String) -> Self {
-        LinuxPatcher {
-            hooks: Vec::new(),
-            self_so_name: self_name,
-        }
+    fn new() -> Self {
+        LinuxPatcher { hooks: Vec::new() }
     }
 
     fn register_hook(&mut self, hook: Hook) {
@@ -183,7 +180,6 @@ impl Patcher for LinuxPatcher {
 
         let mut context = ElfPatcherContext {
             restore_original: false,
-            self_so_name: &self.self_so_name,
             hooks: &self.hooks,
             mappings: &read_mappings(),
         };
@@ -211,7 +207,6 @@ impl Patcher for LinuxPatcher {
 
         let mut context = ElfPatcherContext {
             restore_original: true,
-            self_so_name: &self.self_so_name,
             hooks: &self.hooks,
             mappings: &read_mappings(),
         };
@@ -227,6 +222,15 @@ impl Patcher for LinuxPatcher {
         IS_HOOKING.store(false, Ordering::SeqCst);
         debug!("Finished restoring original functions");
     }
+}
+
+/// Whether `address` lies in one of the object's loaded segments.
+unsafe fn object_contains(info: &dl_phdr_info, address: usize) -> bool {
+    let phdrs = slice::from_raw_parts(info.dlpi_phdr, info.dlpi_phnum as usize);
+    phdrs.iter().any(|phdr| {
+        let start = info.dlpi_addr as usize + phdr.p_vaddr as usize;
+        phdr.p_type == PT_LOAD && (start..start + phdr.p_memsz as usize).contains(&address)
+    })
 }
 
 unsafe extern "C" fn phdrs_callback(
@@ -250,11 +254,17 @@ unsafe extern "C" fn phdrs_callback(
         "[main executable]"
     };
 
-    // Skip hooking the dynamic loader and VDSO
-    if so_name.contains("/ld-linux")
-        || so_name.contains("/ld-musl")
-        || so_name.contains("linux-vdso.so")
-        || (so_name != "[main executable]" && so_name.contains(context.self_so_name))
+    // Skip the dynamic loader, the vDSO, and this extension itself. Match file
+    // names and addresses rather than path substrings, which would also skip
+    // every library under a directory that happens to contain those names.
+    if object_contains(info_ref, phdrs_callback as *const () as usize) {
+        debug!("Skipping this extension: {}", so_name);
+        return 0;
+    }
+    let file_name = so_name.rsplit('/').next().unwrap_or(so_name);
+    if file_name.starts_with("ld-linux")
+        || file_name.starts_with("ld-musl")
+        || file_name.starts_with("linux-vdso.so")
     {
         debug!("Skipping library: {}", so_name);
         return 0;

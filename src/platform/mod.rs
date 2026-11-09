@@ -21,7 +21,7 @@ unsafe impl Sync for Hook {}
 
 /// Common trait that must be implemented by platform-specific patchers
 pub trait Patcher {
-    fn new(self_name: String) -> Self;
+    fn new() -> Self;
     fn register_hook(&mut self, hook: Hook);
     fn apply_hooks(&mut self);
     fn restore_hooks(&mut self);
