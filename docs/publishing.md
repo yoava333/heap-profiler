@@ -35,8 +35,8 @@ free plan does not allow reviewers on private repositories.
 3. Tag the commit and push the tag:
 
    ```sh
-   git tag v0.1.9
-   git push origin v0.1.9
+   git tag v0.2.0
+   git push origin v0.2.0
    ```
 
 CI builds every wheel and the sdist and runs the tests and the performance
