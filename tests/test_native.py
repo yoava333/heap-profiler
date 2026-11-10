@@ -22,8 +22,12 @@ def native(tmp_path):
     compiler = shutil.which("cc")
     if not compiler:
         pytest.skip("native regression tests require a C compiler")
-    source = tmp_path / "probe.c"
-    library = tmp_path / "probe.so"
+    # The patcher once skipped every library whose path contained this
+    # package's name, so every native test now runs from such a directory.
+    directory = tmp_path / "heap_profiler_probe"
+    directory.mkdir()
+    source = directory / "probe.c"
+    library = directory / "probe.so"
     source.write_text("""
         #include <stdlib.h>
         #include <errno.h>
@@ -300,40 +304,6 @@ def test_fork_while_native_threads_hold_profiler_locks(native):
         for thread in threads:
             thread.join(timeout=5)
             assert not thread.is_alive()
-
-
-def test_libraries_under_a_heap_profiler_directory_are_hooked(tmp_path):
-    compiler = shutil.which("cc")
-    if not compiler:
-        pytest.skip("native regression tests require a C compiler")
-    # The patcher once recognized itself by this path substring and skipped
-    # every library whose path contained it.
-    directory = tmp_path / "heap_profiler_project"
-    directory.mkdir()
-    source = directory / "probe.c"
-    library = directory / "probe.so"
-    source.write_text("""
-        #include <stdlib.h>
-        void *allocate(size_t n) { return malloc(n); }
-        void release(void *p) { free(p); }
-    """)
-    flags = ["-shared", "-fPIC", "-fno-builtin"]
-    if sys.platform == "linux":
-        flags += ["-Wl,-z,relro,-z,now"]
-    subprocess.run([compiler, *flags, str(source), "-o", str(library)], check=True, capture_output=True)  # noqa: S603
-    lib = ctypes.CDLL(str(library), mode=os.RTLD_NOW)
-    lib.allocate.argtypes = [ctypes.c_size_t]
-    lib.allocate.restype = ctypes.c_void_p
-    lib.release.argtypes = [ctypes.c_void_p]
-    lib.release(lib.allocate(8))  # Resolve lazy bindings before patching.
-    h.start_tracing(1)
-    try:
-        h.reset_profile_data()
-        pointer = lib.allocate(123457)
-        assert detached_profile()[1] == 123457
-        lib.release(pointer)
-    finally:
-        h.stop_tracing()
 
 
 def test_native_patching_skips_only_this_extension():
