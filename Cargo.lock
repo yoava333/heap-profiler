@@ -95,7 +95,6 @@ name = "heap-profiler"
 version = "0.2.0"
 dependencies = [
  "flate2",
- "foldhash",
  "hashbrown",
  "libc",
  "once_cell",

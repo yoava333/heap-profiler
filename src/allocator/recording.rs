@@ -1,7 +1,8 @@
 use super::TRACING;
 use crate::metadata_store::{self, AllocationMetadata};
 use crate::profile::{MemProfileRecord, PROFILE_DATA, SAMPLE_RATE, TOTAL_ALLOC_BYTES};
-use crate::stack::{calculate_stack_hash, where_in_python, StackBuffer, StackFrame};
+use crate::stack::{where_in_python, StackBuffer, StackFrame};
+use std::hash::BuildHasher;
 use std::sync::atomic::Ordering;
 type ProfileTransaction = crate::sync::MutexGuard<'static, ()>;
 
@@ -49,11 +50,10 @@ fn record_allocation(
 
     // Calculate stack hash
     let mut profile_data = PROFILE_DATA.lock();
-    let stack_hash = resolve_stack_key(
-        &profile_data,
-        &stack[..depth],
-        calculate_stack_hash(&stack[..depth]),
-    );
+    // Key stacks with the map's own randomly seeded hasher: it is created
+    // before tracing starts and kept by reset, so keys stay stable.
+    let key = profile_data.hasher().hash_one(&stack[..depth]);
+    let stack_hash = resolve_stack_key(&profile_data, &stack[..depth], key);
 
     let metadata = AllocationMetadata {
         stack_hash,
