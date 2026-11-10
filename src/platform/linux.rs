@@ -294,70 +294,72 @@ unsafe extern "C" fn phdrs_callback(
 }
 
 unsafe fn patch_symbols(
-    dyn_info_struct: *const Elf64_Dyn,
+    dynamic: *const Elf64_Dyn,
     base: Elf64_Addr,
     restore_original: bool,
     hooks: &[Hook],
     mappings: &[MemoryRegion],
 ) {
-    if dyn_info_struct.is_null() {
+    if dynamic.is_null() {
         debug!("Dynamic info struct is null");
         return;
     }
-
+    let Some(symbols) = SymbolTable::new(dynamic) else {
+        debug!("Could not find symbol table");
+        return;
+    };
     debug!("Processing dynamic section at base address: {:#x}", base);
-    debug!(
-        "Looking for symbols to patch: {:?}",
-        hooks.iter().map(|h| h.symbol_name).collect::<Vec<_>>()
-    );
+    let patcher = RelocationPatcher {
+        symbols: &symbols,
+        base,
+        restore_original,
+        hooks,
+        mappings,
+    };
 
-    // First try PLT relocations
-    match get_jump_table_type(dyn_info_struct) {
-        val if val == DT_REL => {
-            debug!("Found PLT relocation type: REL");
-            overwrite_plt_table::<Elf64_Rel>(
-                dyn_info_struct,
-                base,
-                restore_original,
-                hooks,
-                mappings,
-            )
+    // PLT relocations use whichever entry format DT_PLTREL names.
+    match dynamic_value(dynamic, DT_PLTREL) {
+        Some(DT_REL) => patcher.patch(dynamic_table::<Elf64_Rel>(dynamic, DT_JMPREL, DT_PLTRELSZ)),
+        Some(DT_RELA) => {
+            patcher.patch(dynamic_table::<Elf64_Rela>(dynamic, DT_JMPREL, DT_PLTRELSZ))
         }
-        val if val == DT_RELA => {
-            debug!("Found PLT relocation type: RELA");
-            overwrite_plt_table::<Elf64_Rela>(
-                dyn_info_struct,
-                base,
-                restore_original,
-                hooks,
-                mappings,
-            )
-        }
-        val => {
-            debug!("Unknown PLT relocation type: {}", val);
-        }
+        other => debug!("Unknown PLT relocation type: {:?}", other),
     }
-
-    // Then try regular relocations
-    overwrite_elf_table::<Elf64_Rel>(dyn_info_struct, base, restore_original, hooks, mappings);
-    overwrite_elf_table::<Elf64_Rela>(dyn_info_struct, base, restore_original, hooks, mappings);
+    patcher.patch(dynamic_table::<Elf64_Rel>(dynamic, DT_REL, DT_RELSZ));
+    patcher.patch(dynamic_table::<Elf64_Rela>(dynamic, DT_RELA, DT_RELASZ));
 }
 
-unsafe fn get_jump_table_type(dyn_info: *const Elf64_Dyn) -> i64 {
-    let mut cur = dyn_info;
+/// The value of a dynamic-section entry.
+unsafe fn dynamic_value(dynamic: *const Elf64_Dyn, tag: i64) -> Option<i64> {
+    let mut cur = dynamic;
     while (*cur).d_tag != DT_NULL {
-        if (*cur).d_tag == DT_PLTREL {
-            return (*cur).d_un.d_val;
+        if (*cur).d_tag == tag {
+            return Some((*cur).d_un.d_val);
         }
         cur = cur.add(1);
     }
-    0
+    None
+}
+
+/// A relocation table located by an address entry and a byte-size entry.
+unsafe fn dynamic_table<'a, T>(
+    dynamic: *const Elf64_Dyn,
+    address_tag: i64,
+    size_tag: i64,
+) -> &'a [T] {
+    match (
+        dynamic_value(dynamic, address_tag),
+        dynamic_value(dynamic, size_tag),
+    ) {
+        (Some(address), Some(size)) if address != 0 && size > 0 => slice::from_raw_parts(
+            address as usize as *const T,
+            size as usize / mem::size_of::<T>(),
+        ),
+        _ => &[],
+    }
 }
 
 trait RelocationEntry {
-    unsafe fn find_relocation_table(
-        dyn_info_struct: *const Elf64_Dyn,
-    ) -> Option<(*const Self, usize)>;
     fn offset(&self) -> Elf64_Addr;
     fn info(&self) -> u64;
     fn symbol_index(&self) -> u32 {
@@ -369,33 +371,6 @@ trait RelocationEntry {
 }
 
 impl RelocationEntry for Elf64_Rel {
-    unsafe fn find_relocation_table(
-        dyn_info_struct: *const Elf64_Dyn,
-    ) -> Option<(*const Elf64_Rel, usize)> {
-        let mut rel_ptr: *const Elf64_Rel = ptr::null();
-        let mut rel_sz: usize = 0;
-
-        let mut cur = dyn_info_struct;
-        while (*cur).d_tag != DT_NULL {
-            match (*cur).d_tag {
-                tag if tag == DT_REL => {
-                    rel_ptr = (*cur).d_un.d_ptr as *const Elf64_Rel;
-                }
-                tag if tag == DT_RELSZ => {
-                    rel_sz = (*cur).d_un.d_val as usize;
-                }
-                _ => {}
-            }
-            cur = cur.add(1);
-        }
-        if !rel_ptr.is_null() && rel_sz > 0 {
-            let count = rel_sz / mem::size_of::<Elf64_Rel>();
-            Some((rel_ptr, count))
-        } else {
-            None
-        }
-    }
-
     fn offset(&self) -> Elf64_Addr {
         self.r_offset
     }
@@ -406,33 +381,6 @@ impl RelocationEntry for Elf64_Rel {
 }
 
 impl RelocationEntry for Elf64_Rela {
-    unsafe fn find_relocation_table(
-        dyn_info_struct: *const Elf64_Dyn,
-    ) -> Option<(*const Elf64_Rela, usize)> {
-        let mut rela_ptr: *const Elf64_Rela = ptr::null();
-        let mut rela_sz: usize = 0;
-
-        let mut cur = dyn_info_struct;
-        while (*cur).d_tag != DT_NULL {
-            match (*cur).d_tag {
-                tag if tag == DT_RELA => {
-                    rela_ptr = (*cur).d_un.d_ptr as *const Elf64_Rela;
-                }
-                tag if tag == DT_RELASZ => {
-                    rela_sz = (*cur).d_un.d_val as usize;
-                }
-                _ => {}
-            }
-            cur = cur.add(1);
-        }
-        if !rela_ptr.is_null() && rela_sz > 0 {
-            let count = rela_sz / mem::size_of::<Elf64_Rela>();
-            Some((rela_ptr, count))
-        } else {
-            None
-        }
-    }
-
     fn offset(&self) -> Elf64_Addr {
         self.r_offset
     }
@@ -442,65 +390,43 @@ impl RelocationEntry for Elf64_Rela {
     }
 }
 
-unsafe fn overwrite_elf_table<T>(
-    dyn_info_struct: *const Elf64_Dyn,
-    base_addr: Elf64_Addr,
+/// Rewrites the hooked symbols' slots named by one object's relocations.
+struct RelocationPatcher<'a> {
+    symbols: &'a SymbolTable,
+    base: Elf64_Addr,
     restore_original: bool,
-    hooks: &[Hook],
-    mappings: &[MemoryRegion],
-) where
-    T: RelocationEntry,
-{
-    let symbol_table = match SymbolTable::new(dyn_info_struct) {
-        Some(table) => table,
-        None => {
-            debug!("Could not find symbol table");
-            return;
-        }
-    };
+    hooks: &'a [Hook],
+    mappings: &'a [MemoryRegion],
+}
 
-    if let Some((table, count)) = T::find_relocation_table(dyn_info_struct) {
-        debug!("Found relocation table with {} entries", count);
-        let table_slice = slice::from_raw_parts(table, count);
-        for reloc in table_slice {
+impl RelocationPatcher<'_> {
+    unsafe fn patch<T: RelocationEntry>(&self, relocations: &[T]) {
+        for reloc in relocations {
             if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
                 continue;
             }
-            let symbol_addr = base_addr + reloc.offset();
-            let symbol_idx = reloc.symbol_index();
-
-            // Get symbol from the symbol table
-            let sym = &*symbol_table.symtab.add(symbol_idx as usize);
-            if sym.is_canonical_plt_entry() {
+            let symbol = &*self.symbols.symtab.add(reloc.symbol_index() as usize);
+            if symbol.is_canonical_plt_entry() {
                 continue;
             }
-            if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {
-                debug!(
-                    "Found symbol: {} at address: {:#x}",
-                    symbol_name, symbol_addr
+            let Some(name) = self.symbols.get_symbol_name(symbol.st_name) else {
+                continue;
+            };
+            for hook in self.hooks.iter().filter(|hook| hook.symbol_name == name) {
+                let target = if self.restore_original {
+                    hook.original_fn
+                } else {
+                    hook.intercept_fn
+                };
+                patch_symbol(
+                    (self.base + reloc.offset()) as *mut c_void,
+                    target,
+                    hook,
+                    self.restore_original,
+                    self.mappings,
                 );
-                for hook in hooks {
-                    if symbol_name == hook.symbol_name {
-                        debug!("Found target symbol {} to patch!", hook.symbol_name);
-                        let target_fn = if restore_original {
-                            hook.original_fn
-                        } else {
-                            hook.intercept_fn
-                        };
-                        patch_symbol(
-                            symbol_name,
-                            symbol_addr as *mut c_void,
-                            target_fn,
-                            hook,
-                            restore_original,
-                            mappings,
-                        );
-                    }
-                }
             }
         }
-    } else {
-        debug!("No relocation table found");
     }
 }
 
@@ -544,7 +470,6 @@ fn read_mappings() -> Vec<MemoryRegion> {
 }
 
 unsafe fn patch_symbol(
-    _symbol_name: &str,
     symbol_addr: *mut c_void,
     new_fn: *mut c_void,
     hook: &Hook,
@@ -589,80 +514,6 @@ unsafe fn patch_symbol(
     let _ = slot.compare_exchange(current, new_fn, Ordering::AcqRel, Ordering::Acquire);
     if !writable && mprotect(page, page_size, region.protection) != 0 {
         error!("Could not restore original GOT page protection");
-    }
-}
-
-unsafe fn overwrite_plt_table<T>(
-    dyn_info_struct: *const Elf64_Dyn,
-    base_addr: Elf64_Addr,
-    restore_original: bool,
-    hooks: &[Hook],
-    mappings: &[MemoryRegion],
-) where
-    T: RelocationEntry,
-{
-    let mut jmprel = ptr::null();
-    let mut pltrelsz: usize = 0;
-    let mut cur = dyn_info_struct;
-
-    while (*cur).d_tag != DT_NULL {
-        match (*cur).d_tag {
-            tag if tag == DT_JMPREL => jmprel = (*cur).d_un.d_ptr as *const T,
-            tag if tag == DT_PLTRELSZ => pltrelsz = (*cur).d_un.d_val as usize,
-            _ => {}
-        }
-        cur = cur.add(1);
-    }
-
-    if !jmprel.is_null() && pltrelsz > 0 {
-        let count = pltrelsz / mem::size_of::<T>();
-        debug!("Found PLT table with {} entries", count);
-        let table_slice = slice::from_raw_parts(jmprel, count);
-
-        let symbol_table = match SymbolTable::new(dyn_info_struct) {
-            Some(table) => table,
-            None => {
-                debug!("Could not find symbol table");
-                return;
-            }
-        };
-
-        for reloc in table_slice {
-            if !ALLOWED_RELOC_TYPES.contains(&reloc.reloc_type()) {
-                continue;
-            }
-            let symbol_addr = base_addr + reloc.offset();
-            let symbol_idx = reloc.symbol_index();
-
-            let sym = &*symbol_table.symtab.add(symbol_idx as usize);
-            if sym.is_canonical_plt_entry() {
-                continue;
-            }
-            if let Some(symbol_name) = symbol_table.get_symbol_name(sym.st_name) {
-                debug!(
-                    "Found PLT symbol: {} at address: {:#x}",
-                    symbol_name, symbol_addr
-                );
-                for hook in hooks {
-                    if symbol_name == hook.symbol_name {
-                        debug!("Found target PLT symbol {} to patch!", hook.symbol_name);
-                        let target_fn = if restore_original {
-                            hook.original_fn
-                        } else {
-                            hook.intercept_fn
-                        };
-                        patch_symbol(
-                            symbol_name,
-                            symbol_addr as *mut c_void,
-                            target_fn,
-                            hook,
-                            restore_original,
-                            mappings,
-                        );
-                    }
-                }
-            }
-        }
     }
 }
 
