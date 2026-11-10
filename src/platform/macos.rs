@@ -241,7 +241,6 @@ unsafe fn patch_symbol_addr(hook: &Hook, addr: *mut *mut c_void, restore_origina
 unsafe fn patch_symbols_in_section(
     section: &Section64,
     slide: u64,
-    _image_name: &CStr,
     hooks: &[Hook],
     restore_original: bool,
 ) {
@@ -263,7 +262,6 @@ unsafe fn patch_symbols_in_section(
 unsafe fn patch_symbols_in_shared_object(
     header: *const MachHeader,
     slide: intptr_t,
-    image_name: &CStr,
     hooks: &[Hook],
     restore_original: bool,
 ) {
@@ -275,11 +273,6 @@ unsafe fn patch_symbols_in_shared_object(
     // Note: images are intentionally re-patched on every pass. Patching is
     // idempotent, and skipping by name would permanently miss an image that
     // was unloaded and loaded again at the same path.
-    let image_str = image_name.to_string_lossy();
-    if image_str.contains("libdyld.dylib") || image_str.contains("/usr/lib/system/") {
-        return;
-    }
-
     if (*header).magic != 0xfeedfacf || (*header).flags & 0x80000000 != 0 {
         return;
     }
@@ -312,7 +305,6 @@ unsafe fn patch_symbols_in_shared_object(
                             patch_symbols_in_section(
                                 section,
                                 slide as u64,
-                                image_name,
                                 hooks,
                                 restore_original,
                             );
@@ -326,18 +318,32 @@ unsafe fn patch_symbols_in_shared_object(
 }
 
 /// The Mach-O header of the image containing this extension.
-unsafe fn own_image_header() -> *const c_void {
+unsafe fn own_image_header() -> Option<*const MachHeader> {
     let mut info: libc::Dl_info = mem::zeroed();
-    if libc::dladdr(own_image_header as *const c_void, &mut info) == 0 {
-        return ptr::null();
+    if libc::dladdr(own_image_header as *const c_void, &mut info) == 0 || info.dli_fbase.is_null() {
+        return None;
     }
-    info.dli_fbase as *const c_void
+    Some(info.dli_fbase as *const MachHeader)
+}
+
+/// Images that must never be patched: dyld, libSystem, and this extension.
+/// Recognize this extension by address and system libraries by location;
+/// path substrings would also skip images under any matching directory.
+fn skip_image(header: *const MachHeader, name: &CStr, own_header: *const MachHeader) -> bool {
+    let path = name.to_string_lossy();
+    if header == own_header {
+        debug!("Skipping this extension: {}", path);
+        return true;
+    }
+    let file_name = path.rsplit('/').next().unwrap_or(&path);
+    path.starts_with("/usr/lib/system/") || file_name == "libdyld.dylib"
 }
 
 unsafe fn patch_symbols_in_all_shared_objects(hooks: &[Hook], restore_original: bool) {
-    // Recognize this extension by address: its path can be anything, and a
-    // path substring check also skips every image under a matching directory.
-    let own_header = own_image_header();
+    let Some(own_header) = own_image_header() else {
+        error!("Could not locate this extension's image; skipping native patching");
+        return;
+    };
     let count = _dyld_image_count();
     for i in 0..count {
         let header = _dyld_get_image_header(i);
@@ -349,16 +355,9 @@ unsafe fn patch_symbols_in_all_shared_objects(hooks: &[Hook], restore_original: 
         if name_ptr.is_null() {
             continue;
         }
-        let image_name = CStr::from_ptr(name_ptr);
-        if header as *const c_void == own_header {
-            debug!("Skipping this extension: {}", image_name.to_string_lossy());
+        if skip_image(header, CStr::from_ptr(name_ptr), own_header) {
             continue;
         }
-        if image_name.to_string_lossy().contains("libdyld.dylib")
-            || image_name.to_string_lossy().contains("/usr/lib/system/")
-        {
-            continue;
-        }
-        patch_symbols_in_shared_object(header, slide, image_name, hooks, restore_original);
+        patch_symbols_in_shared_object(header, slide, hooks, restore_original);
     }
 }
