@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use pyo3::ffi;
 use std::ffi::CStr;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -46,7 +46,11 @@ impl Hash for StackFrame {
 }
 
 pub fn calculate_stack_hash(stack: &[StackFrame]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // foldhash rather than the standard library's SipHash, which is designed to
+    // resist hash flooding that profiler-internal keys never face. A fixed
+    // seed needs no initialization inside the allocator hook; collisions are
+    // resolved by comparing stacks, so they can never merge distinct stacks.
+    let mut hasher = foldhash::fast::FixedState::default().build_hasher();
     for frame in stack {
         frame.hash(&mut hasher);
     }

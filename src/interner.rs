@@ -1,6 +1,6 @@
 use crate::sync::Mutex;
+use hashbrown::HashMap;
 use once_cell::sync::Lazy;
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 pub(crate) static STRING_INTERNER: Lazy<Mutex<HashMap<String, Weak<str>>>> =
