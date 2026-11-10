@@ -28,23 +28,14 @@ INSTRUCTIONS = re.compile(r"I\s+refs:\s+([\d,]+)")
 TIMEOUT_SECONDS = 600
 
 
+def workload_command(python: str, workload: str, iterations: int, tracing: bool) -> list[str]:
+    command = [python, str(WORKLOAD_SCRIPT), "--workload", workload, "--iterations", str(iterations), "--repeat", "1"]
+    return [*command, "--tracing"] if tracing else command
+
+
 def count_instructions(python: str, workload: str, iterations: int, tracing: bool) -> int:
-    command = [
-        "valgrind",
-        "--tool=cachegrind",
-        "--cache-sim=no",
-        "--cachegrind-out-file=/dev/null",
-        python,
-        str(WORKLOAD_SCRIPT),
-        "--workload",
-        workload,
-        "--iterations",
-        str(iterations),
-        "--repeat",
-        "1",
-    ]
-    if tracing:
-        command.append("--tracing")
+    valgrind = ["valgrind", "--tool=cachegrind", "--cache-sim=no", "--cachegrind-out-file=/dev/null"]
+    command = valgrind + workload_command(python, workload, iterations, tracing)
     env = dict(os.environ, PYTHONHASHSEED="0")
     try:
         result = subprocess.run(command, capture_output=True, text=True, env=env, check=False, timeout=TIMEOUT_SECONDS)  # noqa: S603
@@ -59,9 +50,7 @@ def count_instructions(python: str, workload: str, iterations: int, tracing: boo
 def workload_instructions(python: str, workload: str, iterations: int, tracing: bool) -> int:
     # Populate bytecode caches first; otherwise only the short run pays for
     # compiling imports and the subtraction underestimates the workload.
-    warm_up = [python, str(WORKLOAD_SCRIPT), "--workload", workload, "--iterations", "1", "--repeat", "1"]
-    if tracing:
-        warm_up.append("--tracing")
+    warm_up = workload_command(python, workload, 1, tracing)
     subprocess.run(warm_up, check=True, capture_output=True, timeout=TIMEOUT_SECONDS)  # noqa: S603
     short = count_instructions(python, workload, iterations, tracing)
     long = count_instructions(python, workload, 2 * iterations, tracing)

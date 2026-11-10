@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use tracing::{debug, error, warn};
 
 use super::Patcher;
-use crate::platform::Hook;
+use crate::platform::{Hook, SKIPPING_THIS_EXTENSION};
 
 /// macOS-specific implementation of the symbol patcher
 pub struct MacOSPatcher {
@@ -332,7 +332,7 @@ unsafe fn own_image_header() -> Option<*const MachHeader> {
 fn skip_image(header: *const MachHeader, name: &CStr, own_header: *const MachHeader) -> bool {
     let path = name.to_string_lossy();
     if header == own_header {
-        debug!("Skipping this extension: {}", path);
+        debug!("{}: {}", SKIPPING_THIS_EXTENSION, path);
         return true;
     }
     let file_name = path.rsplit('/').next().unwrap_or(&path);

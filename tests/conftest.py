@@ -4,7 +4,7 @@ import signal
 import traceback
 
 import pytest
-from _pytest.runner import CallInfo, runtestprotocol
+from _pytest.runner import runtestprotocol
 
 
 def pytest_configure(config):
@@ -58,7 +58,7 @@ def _run_forked(item):
     else:
         reason = f"EXITED with status {os.WEXITSTATUS(status)}"
     message = f"{item.location[0]}:{item.location[1]}: running the test {reason}"
-    call = CallInfo.from_call(lambda: pytest.fail(message, pytrace=False), "call")
+    call = pytest.CallInfo.from_call(lambda: pytest.fail(message, pytrace=False), "call")
     return [hook.pytest_runtest_makereport(item=item, call=call)]
 
 

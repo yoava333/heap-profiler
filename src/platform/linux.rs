@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use tracing::{debug, error};
 
 use super::Patcher;
-use crate::platform::Hook;
+use crate::platform::{Hook, SKIPPING_THIS_EXTENSION};
 
 // Constants not provided by libc
 const DT_NULL: i64 = 0;
@@ -258,7 +258,7 @@ unsafe extern "C" fn phdrs_callback(
     // names and addresses rather than path substrings, which would also skip
     // every library under a directory that happens to contain those names.
     if object_contains(info_ref, phdrs_callback as *const () as usize) {
-        debug!("Skipping this extension: {}", so_name);
+        debug!("{}: {}", SKIPPING_THIS_EXTENSION, so_name);
         return 0;
     }
     let file_name = so_name.rsplit('/').next().unwrap_or(so_name);

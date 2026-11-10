@@ -315,7 +315,7 @@ def test_native_patching_skips_only_this_extension():
         env={**os.environ, "HEAP_PROFILER_LOG": "heap_profiler=debug"},
     )
     assert result.returncode == 0, result.stderr
-    prefix = "Skipping this extension: "
+    prefix = "Skipping this extension: "  # SKIPPING_THIS_EXTENSION in src/platform/mod.rs
     skipped = {
         message.removeprefix(prefix)
         for line in result.stderr.splitlines()

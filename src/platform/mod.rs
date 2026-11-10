@@ -8,6 +8,9 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::LinuxPatcher as PlatformPatcher;
 
+/// Logged when a patcher skips this extension; tests match this text.
+pub(crate) const SKIPPING_THIS_EXTENSION: &str = "Skipping this extension";
+
 #[derive(Debug, Clone, Copy)]
 pub struct Hook {
     pub symbol_name: &'static str,

@@ -1,5 +1,8 @@
+import ast
 import gc
+import inspect
 import random
+from pathlib import Path
 from string import ascii_letters
 
 import numpy as np
@@ -7,7 +10,7 @@ import pytest
 from proto.profile_pb2 import Profile
 from test_utils import memory_stress
 
-from heap_profiler import get_pprof_data, get_profile_data, start_tracing
+from heap_profiler import get_pprof_data, get_profile_data, get_sample_rate, start_tracing
 
 pytestmark = pytest.mark.forked
 
@@ -279,3 +282,14 @@ def test_profiler_memory_consumption():
 
     # Allow a small increase in memory usage, but not more than 5 MiB
     assert (final_memory - initial_memory) / (1024 * 1024) < 5, "Memory usage increased significantly"
+
+
+def test_default_sample_rate_agrees_everywhere():
+    # Rust attributes need a literal, so the default is restated in the text
+    # signature and the stub; keep them in step with the runtime default.
+    signature_default = inspect.signature(start_tracing).parameters["sample_rate"].default
+    stub = ast.parse((Path(__file__).parent.parent / "heap_profiler.pyi").read_text())
+    stub_start = next(node for node in stub.body if isinstance(node, ast.FunctionDef) and node.name == "start_tracing")
+    stub_default = ast.literal_eval(stub_start.args.defaults[0])
+    start_tracing()
+    assert signature_default == stub_default == get_sample_rate() == 128 * 1024
