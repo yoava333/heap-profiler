@@ -36,6 +36,8 @@ build-backend = "maturin"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "heap_profiler"
+# Builds must use the committed Cargo.lock.
+locked = true
 
 [dependency-groups]
 dev = [

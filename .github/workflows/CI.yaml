@@ -38,24 +38,26 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 
-      # Build in the PyPA manylinux image with maturin from PyPI. maturin-action
-      # downloads maturin from GitHub Releases, which makes builds fail whenever
-      # those downloads do.
+      # Build in the PyPA manylinux image through the PEP 517 backend, which
+      # installs the maturin pyproject.toml declares. maturin-action downloads
+      # maturin from GitHub Releases, which fails whenever those downloads do.
+      # PEP 517 builds default to plain linux tags, so name the manylinux
+      # policy that this image satisfies.
       - name: Build wheels
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
           docker run --rm -e PYTHON_VERSION -v "$PWD":/io -w /io \
+            -e MATURIN_PEP517_ARGS="--compatibility manylinux_2_28" \
             quay.io/pypa/manylinux_2_28_${{ matrix.platform.target }} bash -euo pipefail -c '
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
               source "$HOME/.cargo/env"
               tag="cp${PYTHON_VERSION//./}"
-              python="/opt/python/${tag}-${tag}/bin/python"
-              "$python" -m pip install "maturin>=1.9.3,<2"
-              "$python" -m maturin build --locked --release --out dist -i "$python" --compatibility manylinux_2_28
+              "/opt/python/${tag}-${tag}/bin/python" -m pip wheel --no-deps --wheel-dir dist .
             '
 
-      - name: Run tests
+      - &run-tests
+        name: Run tests
         run: |
           set -xe
           uv sync --locked --no-install-project --python ${{ matrix.python-version }}
@@ -114,16 +116,9 @@ jobs:
       - name: Build wheels
         run: |
           uv python install ${{ matrix.python-version }}
-          uvx --from "maturin>=1.9.3,<2" maturin build --locked --release --out dist \
-            -i "$(uv python find --system ${{ matrix.python-version }})"
+          uv build --wheel --out-dir dist --python "$(uv python find --system ${{ matrix.python-version }})"
 
-      - name: Run tests
-        run: |
-          set -xe
-          uv sync --locked --no-install-project --python ${{ matrix.python-version }}
-          source .venv/bin/activate
-          uv pip install --no-deps dist/*.whl
-          pytest -q tests/
+      - *run-tests
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -137,7 +132,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.3
       - name: Build sdist
-        run: uvx --from "maturin>=1.9.3,<2" maturin sdist --out dist
+        run: uv build --sdist --out-dir dist
       - name: Upload sdist
         uses: actions/upload-artifact@v7
         with:
