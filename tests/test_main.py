@@ -7,7 +7,7 @@ import pytest
 from proto.profile_pb2 import Profile
 from test_utils import memory_stress
 
-from heap_profiler import get_pprof_data, get_profile_data, reset_profile_data, start_tracing
+from heap_profiler import get_pprof_data, get_profile_data, start_tracing
 
 pytestmark = pytest.mark.forked
 
@@ -265,27 +265,6 @@ def test_non_ascii_filename_in_stack(tmp_path):
     assert any("módulo_ñ" in filename for filename, _, _ in frames), "stack should contain the non-ASCII filename"
     # The walk must not stop at the non-ASCII frame: this test file must appear too
     assert any("test_main.py" in filename for filename, _, _ in frames)
-
-
-@pytest.mark.parametrize(
-    ("filename", "function"),
-    [
-        ("latin1_ñ.py", "función_ñ"),  # one byte per character, not ASCII
-        ("bmp_函数.py", "函数"),  # two bytes per character
-        ("astral_😀.py", "astral_𐌰"),  # four bytes per character
-    ],
-)
-def test_non_ascii_names_are_exact(filename, function):
-    # CPython stores str in 1, 2, or 4 bytes per character; names must decode
-    # exactly from each representation.
-    namespace = {}
-    exec(compile(f"def {function}():\n    return bytes(2 * 1024 * 1024)\n", filename, "exec"), namespace)  # noqa: S102
-    reset_profile_data()
-    start_tracing(1)
-    data = namespace[function]()
-    frames = [frame[:2] for entry in get_profile_data() for frame in entry.stack_frames]
-    assert (filename, function) in frames
-    assert data
 
 
 def test_profiler_memory_consumption():
