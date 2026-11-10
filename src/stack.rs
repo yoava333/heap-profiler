@@ -2,7 +2,7 @@ use once_cell::sync::Lazy;
 use pyo3::ffi;
 use std::ffi::CStr;
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::{debug, warn};
 
 use crate::interner::intern;
@@ -45,12 +45,15 @@ impl Hash for StackFrame {
     }
 }
 
+/// One randomly seeded hasher per process, so stack keys stay comparable for
+/// as long as profile data lives, across stop and restart. Seeding reads the
+/// clock and allocates, so initialize_markers does it outside allocator hooks.
+static STACK_HASHER: OnceLock<foldhash::fast::RandomState> = OnceLock::new();
+
 pub fn calculate_stack_hash(stack: &[StackFrame]) -> u64 {
-    // foldhash rather than the standard library's SipHash, which is designed to
-    // resist hash flooding that profiler-internal keys never face. A fixed
-    // seed needs no initialization inside the allocator hook; collisions are
-    // resolved by comparing stacks, so they can never merge distinct stacks.
-    let mut hasher = foldhash::fast::FixedState::default().build_hasher();
+    // foldhash is much cheaper than the standard library's SipHash. Collisions
+    // are resolved by comparing stacks, so they can never merge distinct stacks.
+    let mut hasher = STACK_HASHER.get_or_init(Default::default).build_hasher();
     for frame in stack {
         frame.hash(&mut hasher);
     }
@@ -219,4 +222,5 @@ pub(crate) fn initialize_markers() {
     Lazy::force(&NATIVE_FILENAME);
     Lazy::force(&DETACHED_FILENAME);
     Lazy::force(&NATIVE_FUNCTION);
+    STACK_HASHER.get_or_init(Default::default);
 }

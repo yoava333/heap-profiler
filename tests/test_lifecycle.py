@@ -76,6 +76,24 @@ def test_stop_tracing_stops_recording():
     assert resumed - after >= 4 * MiB, "tracing must resume after restart"
 
 
+def test_restart_keeps_one_record_per_stack():
+    # Stack keys must not change between tracing sessions, or one stack's
+    # history splits into separate records.
+    def allocate():
+        return bytes(3 * MiB)
+
+    start_tracing(sample_rate=1)
+    held = []
+    for restart in (False, True):
+        if restart:
+            stop_tracing()
+            start_tracing(sample_rate=1)
+        held.append(allocate())
+    records = [e for e in get_profile_data() if e.stack_frames and e.stack_frames[0][1] == "allocate"]
+    assert len(records) == 1, [(e.alloc_bytes, e.stack_frames[:2]) for e in records]
+    assert records[0].alloc_bytes >= 6 * MiB
+
+
 @pytest.mark.no_tracing
 def test_stop_tracing_without_start_is_noop():
     stop_tracing()
